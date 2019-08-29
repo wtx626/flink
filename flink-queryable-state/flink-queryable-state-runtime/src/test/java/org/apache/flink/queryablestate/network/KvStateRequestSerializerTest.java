@@ -25,15 +25,22 @@ import org.apache.flink.api.common.typeutils.TypeSerializer;
 import org.apache.flink.api.common.typeutils.base.LongSerializer;
 import org.apache.flink.api.common.typeutils.base.StringSerializer;
 import org.apache.flink.api.java.tuple.Tuple2;
+import org.apache.flink.core.fs.CloseableRegistry;
 import org.apache.flink.queryablestate.client.VoidNamespace;
 import org.apache.flink.queryablestate.client.VoidNamespaceSerializer;
 import org.apache.flink.queryablestate.client.state.serialization.KvStateSerializer;
 import org.apache.flink.runtime.query.TaskKvStateRegistry;
+import org.apache.flink.runtime.state.AbstractStateBackend;
+import org.apache.flink.runtime.state.BackendBuildingException;
 import org.apache.flink.runtime.state.KeyGroupRange;
+import org.apache.flink.runtime.state.TestLocalRecoveryConfig;
 import org.apache.flink.runtime.state.heap.HeapKeyedStateBackend;
+import org.apache.flink.runtime.state.heap.HeapKeyedStateBackendBuilder;
+import org.apache.flink.runtime.state.heap.HeapPriorityQueueSetFactory;
 import org.apache.flink.runtime.state.internal.InternalKvState;
 import org.apache.flink.runtime.state.internal.InternalListState;
 import org.apache.flink.runtime.state.internal.InternalMapState;
+import org.apache.flink.runtime.state.ttl.TtlTimeProvider;
 
 import org.junit.Test;
 import org.junit.runner.RunWith;
@@ -44,6 +51,7 @@ import java.io.IOException;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collection;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -184,23 +192,11 @@ public class KvStateRequestSerializerTest {
 	@Test
 	public void testListSerialization() throws Exception {
 		final long key = 0L;
+		final HeapKeyedStateBackend<Long> longHeapKeyedStateBackend = getLongHeapKeyedStateBackend(key);
 
-		// objects for heap state list serialisation
-		final HeapKeyedStateBackend<Long> longHeapKeyedStateBackend =
-			new HeapKeyedStateBackend<>(
-				mock(TaskKvStateRegistry.class),
-				LongSerializer.INSTANCE,
-				ClassLoader.getSystemClassLoader(),
-				1,
-				new KeyGroupRange(0, 0),
-				async,
-				new ExecutionConfig()
-			);
-		longHeapKeyedStateBackend.setCurrentKey(key);
-
-		final InternalListState<VoidNamespace, Long> listState = longHeapKeyedStateBackend.createListState(
-				VoidNamespaceSerializer.INSTANCE,
-				new ListStateDescriptor<>("test", LongSerializer.INSTANCE));
+		final InternalListState<Long, VoidNamespace, Long> listState = longHeapKeyedStateBackend.createInternalState(
+			VoidNamespaceSerializer.INSTANCE,
+			new ListStateDescriptor<>("test", LongSerializer.INSTANCE));
 
 		testListSerialization(key, listState);
 	}
@@ -218,7 +214,7 @@ public class KvStateRequestSerializerTest {
 	 */
 	public static void testListSerialization(
 			final long key,
-			final InternalListState<VoidNamespace, Long> listState) throws Exception {
+			final InternalListState<Long, VoidNamespace, Long> listState) throws Exception {
 
 		TypeSerializer<Long> valueSerializer = LongSerializer.INSTANCE;
 		listState.setCurrentNamespace(VoidNamespace.INSTANCE);
@@ -238,7 +234,11 @@ public class KvStateRequestSerializerTest {
 				key, LongSerializer.INSTANCE,
 				VoidNamespace.INSTANCE, VoidNamespaceSerializer.INSTANCE);
 
-		final byte[] serializedValues = listState.getSerializedValue(serializedKey);
+		final byte[] serializedValues = listState.getSerializedValue(
+				serializedKey,
+				listState.getKeySerializer(),
+				listState.getNamespaceSerializer(),
+				listState.getValueSerializer());
 
 		List<Long> actualValues = KvStateSerializer.deserializeList(serializedValues, valueSerializer);
 		assertEquals(expectedValues, actualValues);
@@ -286,26 +286,39 @@ public class KvStateRequestSerializerTest {
 	@Test
 	public void testMapSerialization() throws Exception {
 		final long key = 0L;
+		final HeapKeyedStateBackend<Long> longHeapKeyedStateBackend = getLongHeapKeyedStateBackend(key);
 
-		// objects for heap state list serialisation
-		final HeapKeyedStateBackend<Long> longHeapKeyedStateBackend =
-			new HeapKeyedStateBackend<>(
-					mock(TaskKvStateRegistry.class),
-					LongSerializer.INSTANCE,
-					ClassLoader.getSystemClassLoader(),
-					1,
-					new KeyGroupRange(0, 0),
-					async,
-					new ExecutionConfig()
-			);
-		longHeapKeyedStateBackend.setCurrentKey(key);
-
-		final InternalMapState<VoidNamespace, Long, String> mapState = (InternalMapState<VoidNamespace, Long, String>) longHeapKeyedStateBackend.getPartitionedState(
-				VoidNamespace.INSTANCE,
-				VoidNamespaceSerializer.INSTANCE,
-				new MapStateDescriptor<>("test", LongSerializer.INSTANCE, StringSerializer.INSTANCE));
+		final InternalMapState<Long, VoidNamespace, Long, String> mapState =
+				(InternalMapState<Long, VoidNamespace, Long, String>)
+						longHeapKeyedStateBackend.getPartitionedState(
+								VoidNamespace.INSTANCE,
+								VoidNamespaceSerializer.INSTANCE,
+								new MapStateDescriptor<>("test", LongSerializer.INSTANCE, StringSerializer.INSTANCE));
 
 		testMapSerialization(key, mapState);
+	}
+
+	private HeapKeyedStateBackend<Long> getLongHeapKeyedStateBackend(final long key) throws BackendBuildingException {
+		final KeyGroupRange keyGroupRange = new KeyGroupRange(0, 0);
+		ExecutionConfig executionConfig = new ExecutionConfig();
+		// objects for heap state list serialisation
+		final HeapKeyedStateBackend<Long> longHeapKeyedStateBackend =
+			new HeapKeyedStateBackendBuilder<>(
+				mock(TaskKvStateRegistry.class),
+				LongSerializer.INSTANCE,
+				ClassLoader.getSystemClassLoader(),
+				keyGroupRange.getNumberOfKeyGroups(),
+				keyGroupRange,
+				executionConfig,
+				TtlTimeProvider.DEFAULT,
+				Collections.emptyList(),
+				AbstractStateBackend.getCompressionDecorator(executionConfig),
+				TestLocalRecoveryConfig.disabled(),
+				new HeapPriorityQueueSetFactory(keyGroupRange, keyGroupRange.getNumberOfKeyGroups(), 128),
+				async,
+				new CloseableRegistry()).build();
+		longHeapKeyedStateBackend.setCurrentKey(key);
+		return longHeapKeyedStateBackend;
 	}
 
 	/**
@@ -321,7 +334,7 @@ public class KvStateRequestSerializerTest {
 	 */
 	public static void testMapSerialization(
 			final long key,
-			final InternalMapState<VoidNamespace, Long, String> mapState) throws Exception {
+			final InternalMapState<Long, VoidNamespace, Long, String> mapState) throws Exception {
 
 		TypeSerializer<Long> userKeySerializer = LongSerializer.INSTANCE;
 		TypeSerializer<String> userValueSerializer = StringSerializer.INSTANCE;
@@ -345,7 +358,11 @@ public class KvStateRequestSerializerTest {
 				key, LongSerializer.INSTANCE,
 				VoidNamespace.INSTANCE, VoidNamespaceSerializer.INSTANCE);
 
-		final byte[] serializedValues = mapState.getSerializedValue(serializedKey);
+		final byte[] serializedValues = mapState.getSerializedValue(
+				serializedKey,
+				mapState.getKeySerializer(),
+				mapState.getNamespaceSerializer(),
+				mapState.getValueSerializer());
 
 		Map<Long, String> actualValues = KvStateSerializer.deserializeMap(serializedValues, userKeySerializer, userValueSerializer);
 		assertEquals(expectedValues.size(), actualValues.size());

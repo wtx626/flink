@@ -25,11 +25,11 @@ under the License.
 	<parent>
 		<groupId>org.apache.flink</groupId>
 		<artifactId>flink-metrics</artifactId>
-		<version>1.5-SNAPSHOT</version>
+		<version>1.10-SNAPSHOT</version>
 		<relativePath>..</relativePath>
 	</parent>
 
-	<artifactId>flink-metrics-prometheus</artifactId>
+	<artifactId>flink-metrics-prometheus_${scala.binary.version}</artifactId>
 	<name>flink-metrics-prometheus</name>
 
 	<dependencies>
@@ -73,6 +73,12 @@ under the License.
 			<version>${prometheus.version}</version>
 		</dependency>
 
+		<dependency>
+			<groupId>io.prometheus</groupId>
+			<artifactId>simpleclient_pushgateway</artifactId>
+			<version>${prometheus.version}</version>
+		</dependency>
+
 		<!-- test dependencies -->
 
 		<dependency>
@@ -105,11 +111,17 @@ under the License.
 				<artifactId>maven-shade-plugin</artifactId>
 				<executions>
 					<execution>
+						<id>shade-flink</id>
 						<phase>package</phase>
 						<goals>
 							<goal>shade</goal>
 						</goals>
 						<configuration>
+							<artifactSet>
+								<includes>
+									<include>io.prometheus:*</include>
+								</includes>
+							</artifactSet>
 							<relocations combine.children="append">
 								<relocation>
 									<pattern>io.prometheus.client</pattern>

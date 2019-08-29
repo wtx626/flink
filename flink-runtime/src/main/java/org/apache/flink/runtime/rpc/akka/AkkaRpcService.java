@@ -18,7 +18,6 @@
 
 package org.apache.flink.runtime.rpc.akka;
 
-import org.apache.flink.api.common.time.Time;
 import org.apache.flink.api.java.tuple.Tuple2;
 import org.apache.flink.runtime.akka.AkkaUtils;
 import org.apache.flink.runtime.concurrent.FutureUtils;
@@ -33,6 +32,8 @@ import org.apache.flink.runtime.rpc.RpcServer;
 import org.apache.flink.runtime.rpc.RpcService;
 import org.apache.flink.runtime.rpc.RpcUtils;
 import org.apache.flink.runtime.rpc.exceptions.RpcConnectionException;
+import org.apache.flink.runtime.rpc.messages.HandshakeSuccessMessage;
+import org.apache.flink.runtime.rpc.messages.RemoteHandshakeMessage;
 
 import akka.actor.ActorIdentity;
 import akka.actor.ActorRef;
@@ -40,26 +41,28 @@ import akka.actor.ActorSelection;
 import akka.actor.ActorSystem;
 import akka.actor.Address;
 import akka.actor.Identify;
-import akka.actor.Kill;
 import akka.actor.Props;
 import akka.dispatch.Futures;
-import akka.dispatch.Mapper;
 import akka.pattern.Patterns;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import javax.annotation.Nonnull;
 import javax.annotation.concurrent.GuardedBy;
 import javax.annotation.concurrent.ThreadSafe;
 
 import java.io.Serializable;
 import java.lang.reflect.InvocationHandler;
 import java.lang.reflect.Proxy;
+import java.util.ArrayList;
+import java.util.Collection;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.Callable;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CompletionException;
 import java.util.concurrent.Executor;
 import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
@@ -67,6 +70,7 @@ import java.util.function.Function;
 
 import scala.Option;
 import scala.concurrent.Future;
+import scala.reflect.ClassTag$;
 
 import static org.apache.flink.util.Preconditions.checkArgument;
 import static org.apache.flink.util.Preconditions.checkNotNull;
@@ -81,35 +85,28 @@ public class AkkaRpcService implements RpcService {
 
 	private static final Logger LOG = LoggerFactory.getLogger(AkkaRpcService.class);
 
-	static final String MAXIMUM_FRAME_SIZE_PATH = "akka.remote.netty.tcp.maximum-frame-size";
+	static final int VERSION = 1;
 
 	private final Object lock = new Object();
 
 	private final ActorSystem actorSystem;
-	private final Time timeout;
+	private final AkkaRpcServiceConfiguration configuration;
 
 	@GuardedBy("lock")
 	private final Map<ActorRef, RpcEndpoint> actors = new HashMap<>(4);
-
-	private final long maximumFramesize;
 
 	private final String address;
 	private final int port;
 
 	private final ScheduledExecutor internalScheduledExecutor;
 
+	private final CompletableFuture<Void> terminationFuture;
+
 	private volatile boolean stopped;
 
-	public AkkaRpcService(final ActorSystem actorSystem, final Time timeout) {
+	public AkkaRpcService(final ActorSystem actorSystem, final AkkaRpcServiceConfiguration configuration) {
 		this.actorSystem = checkNotNull(actorSystem, "actor system");
-		this.timeout = checkNotNull(timeout, "timeout");
-
-		if (actorSystem.settings().config().hasPath(MAXIMUM_FRAME_SIZE_PATH)) {
-			maximumFramesize = actorSystem.settings().config().getBytes(MAXIMUM_FRAME_SIZE_PATH);
-		} else {
-			// only local communication
-			maximumFramesize = Long.MAX_VALUE;
-		}
+		this.configuration = checkNotNull(configuration, "akka rpc service configuration");
 
 		Address actorSystemAddress = AkkaUtils.getAddress(actorSystem);
 
@@ -127,11 +124,17 @@ public class AkkaRpcService implements RpcService {
 
 		internalScheduledExecutor = new ActorSystemScheduledExecutorAdapter(actorSystem);
 
+		terminationFuture = new CompletableFuture<>();
+
 		stopped = false;
 	}
 
 	public ActorSystem getActorSystem() {
 		return actorSystem;
+	}
+
+	protected int getVersion() {
+		return VERSION;
 	}
 
 	@Override
@@ -160,8 +163,8 @@ public class AkkaRpcService implements RpcService {
 					addressHostname.f0,
 					addressHostname.f1,
 					actorRef,
-					timeout,
-					maximumFramesize,
+					configuration.getTimeout(),
+					configuration.getMaximumFramesize(),
 					null);
 			});
 	}
@@ -179,8 +182,8 @@ public class AkkaRpcService implements RpcService {
 					addressHostname.f0,
 					addressHostname.f1,
 					actorRef,
-					timeout,
-					maximumFramesize,
+					configuration.getTimeout(),
+					configuration.getMaximumFramesize(),
 					null,
 					() -> fencingToken);
 			});
@@ -190,13 +193,23 @@ public class AkkaRpcService implements RpcService {
 	public <C extends RpcEndpoint & RpcGateway> RpcServer startServer(C rpcEndpoint) {
 		checkNotNull(rpcEndpoint, "rpc endpoint");
 
-		CompletableFuture<Boolean> terminationFuture = new CompletableFuture<>();
+		CompletableFuture<Void> terminationFuture = new CompletableFuture<>();
 		final Props akkaRpcActorProps;
 
 		if (rpcEndpoint instanceof FencedRpcEndpoint) {
-			akkaRpcActorProps = Props.create(FencedAkkaRpcActor.class, rpcEndpoint, terminationFuture);
+			akkaRpcActorProps = Props.create(
+				FencedAkkaRpcActor.class,
+				rpcEndpoint,
+				terminationFuture,
+				getVersion(),
+				configuration.getMaximumFramesize());
 		} else {
-			akkaRpcActorProps = Props.create(AkkaRpcActor.class, rpcEndpoint, terminationFuture);
+			akkaRpcActorProps = Props.create(
+				AkkaRpcActor.class,
+				rpcEndpoint,
+				terminationFuture,
+				getVersion(),
+				configuration.getMaximumFramesize());
 		}
 
 		ActorRef actorRef;
@@ -231,8 +244,8 @@ public class AkkaRpcService implements RpcService {
 				akkaAddress,
 				hostname,
 				actorRef,
-				timeout,
-				maximumFramesize,
+				configuration.getTimeout(),
+				configuration.getMaximumFramesize(),
 				terminationFuture,
 				((FencedRpcEndpoint<?>) rpcEndpoint)::getFencingToken);
 
@@ -242,8 +255,8 @@ public class AkkaRpcService implements RpcService {
 				akkaAddress,
 				hostname,
 				actorRef,
-				timeout,
-				maximumFramesize,
+				configuration.getTimeout(),
+				configuration.getMaximumFramesize(),
 				terminationFuture);
 		}
 
@@ -269,8 +282,8 @@ public class AkkaRpcService implements RpcService {
 				rpcServer.getAddress(),
 				rpcServer.getHostname(),
 				((AkkaBasedEndpoint) rpcServer).getActorRef(),
-				timeout,
-				maximumFramesize,
+				configuration.getTimeout(),
+				configuration.getMaximumFramesize(),
 				null,
 				() -> fencingToken);
 
@@ -303,7 +316,7 @@ public class AkkaRpcService implements RpcService {
 			}
 
 			if (rpcEndpoint != null) {
-				akkaClient.getActorRef().tell(Kill.getInstance(), ActorRef.noSender());
+				terminateAkkaRpcActor(akkaClient.getActorRef(), rpcEndpoint);
 			} else {
 				LOG.debug("RPC endpoint {} already stopped or from different RPC service", selfGateway.getAddress());
 			}
@@ -311,33 +324,61 @@ public class AkkaRpcService implements RpcService {
 	}
 
 	@Override
-	public void stopService() {
-		LOG.info("Stopping Akka RPC service.");
+	public CompletableFuture<Void> stopService() {
+		final CompletableFuture<Void> akkaRpcActorsTerminationFuture;
 
 		synchronized (lock) {
 			if (stopped) {
-				return;
+				return terminationFuture;
 			}
+
+			LOG.info("Stopping Akka RPC service.");
 
 			stopped = true;
 
+			akkaRpcActorsTerminationFuture = terminateAkkaRpcActors();
 		}
 
-		actorSystem.shutdown();
-		actorSystem.awaitTermination();
+		final CompletableFuture<Void> actorSystemTerminationFuture = FutureUtils.composeAfterwards(
+			akkaRpcActorsTerminationFuture,
+			() -> FutureUtils.toJava(actorSystem.terminate()));
 
-		synchronized (lock) {
-			actors.clear();
+		actorSystemTerminationFuture.whenComplete(
+			(Void ignored, Throwable throwable) -> {
+				if (throwable != null) {
+					terminationFuture.completeExceptionally(throwable);
+				} else {
+					terminationFuture.complete(null);
+				}
+
+				LOG.info("Stopped Akka RPC service.");
+			});
+
+		return terminationFuture;
+	}
+
+	@GuardedBy("lock")
+	@Nonnull
+	private CompletableFuture<Void> terminateAkkaRpcActors() {
+		final Collection<CompletableFuture<Void>> akkaRpcActorTerminationFutures = new ArrayList<>(actors.size());
+
+		for (Map.Entry<ActorRef, RpcEndpoint> actorRefRpcEndpointEntry : actors.entrySet()) {
+			akkaRpcActorTerminationFutures.add(terminateAkkaRpcActor(actorRefRpcEndpointEntry.getKey(), actorRefRpcEndpointEntry.getValue()));
 		}
+		actors.clear();
 
-		LOG.info("Stopped Akka RPC service.");
+		return FutureUtils.waitForAll(akkaRpcActorTerminationFutures);
+	}
+
+	private CompletableFuture<Void> terminateAkkaRpcActor(ActorRef akkaRpcActorRef, RpcEndpoint rpcEndpoint) {
+		akkaRpcActorRef.tell(ControlMessages.TERMINATE, ActorRef.noSender());
+
+		return rpcEndpoint.getTerminationFuture();
 	}
 
 	@Override
 	public CompletableFuture<Void> getTerminationFuture() {
-		return CompletableFuture.runAsync(
-			actorSystem::awaitTermination,
-			getExecutor());
+		return terminationFuture;
 	}
 
 	@Override
@@ -366,7 +407,7 @@ public class AkkaRpcService implements RpcService {
 
 	@Override
 	public <T> CompletableFuture<T> execute(Callable<T> callable) {
-		Future<T> scalaFuture = Futures.future(callable, actorSystem.dispatcher());
+		Future<T> scalaFuture = Futures.<T>future(callable, actorSystem.dispatcher());
 
 		return FutureUtils.toJava(scalaFuture);
 	}
@@ -399,36 +440,45 @@ public class AkkaRpcService implements RpcService {
 
 		final ActorSelection actorSel = actorSystem.actorSelection(address);
 
-		final Future<Object> identify = Patterns.ask(actorSel, new Identify(42), timeout.toMilliseconds());
-		final Future<C> resultFuture = identify.map(new Mapper<Object, C>(){
-			@Override
-			public C checkedApply(Object obj) throws Exception {
+		final Future<ActorIdentity> identify = Patterns
+			.ask(actorSel, new Identify(42), configuration.getTimeout().toMilliseconds())
+			.<ActorIdentity>mapTo(ClassTag$.MODULE$.<ActorIdentity>apply(ActorIdentity.class));
 
-				ActorIdentity actorIdentity = (ActorIdentity) obj;
+		final CompletableFuture<ActorIdentity> identifyFuture = FutureUtils.toJava(identify);
 
+		final CompletableFuture<ActorRef> actorRefFuture = identifyFuture.thenApply(
+			(ActorIdentity actorIdentity) -> {
 				if (actorIdentity.getRef() == null) {
-					throw new RpcConnectionException("Could not connect to rpc endpoint under address " + address + '.');
+					throw new CompletionException(new RpcConnectionException("Could not connect to rpc endpoint under address " + address + '.'));
 				} else {
-					ActorRef actorRef = actorIdentity.getRef();
-
-					InvocationHandler invocationHandler = invocationHandlerFactory.apply(actorRef);
-
-					// Rather than using the System ClassLoader directly, we derive the ClassLoader
-					// from this class . That works better in cases where Flink runs embedded and all Flink
-					// code is loaded dynamically (for example from an OSGI bundle) through a custom ClassLoader
-					ClassLoader classLoader = AkkaRpcService.this.getClass().getClassLoader();
-
-					@SuppressWarnings("unchecked")
-					C proxy = (C) Proxy.newProxyInstance(
-						classLoader,
-						new Class<?>[]{clazz},
-						invocationHandler);
-
-					return proxy;
+					return actorIdentity.getRef();
 				}
-			}
-		}, actorSystem.dispatcher());
+			});
 
-		return FutureUtils.toJava(resultFuture);
+		final CompletableFuture<HandshakeSuccessMessage> handshakeFuture = actorRefFuture.thenCompose(
+			(ActorRef actorRef) -> FutureUtils.toJava(
+				Patterns
+					.ask(actorRef, new RemoteHandshakeMessage(clazz, getVersion()), configuration.getTimeout().toMilliseconds())
+					.<HandshakeSuccessMessage>mapTo(ClassTag$.MODULE$.<HandshakeSuccessMessage>apply(HandshakeSuccessMessage.class))));
+
+		return actorRefFuture.thenCombineAsync(
+			handshakeFuture,
+			(ActorRef actorRef, HandshakeSuccessMessage ignored) -> {
+				InvocationHandler invocationHandler = invocationHandlerFactory.apply(actorRef);
+
+				// Rather than using the System ClassLoader directly, we derive the ClassLoader
+				// from this class . That works better in cases where Flink runs embedded and all Flink
+				// code is loaded dynamically (for example from an OSGI bundle) through a custom ClassLoader
+				ClassLoader classLoader = getClass().getClassLoader();
+
+				@SuppressWarnings("unchecked")
+				C proxy = (C) Proxy.newProxyInstance(
+					classLoader,
+					new Class<?>[]{clazz},
+					invocationHandler);
+
+				return proxy;
+			},
+			actorSystem.dispatcher());
 	}
 }

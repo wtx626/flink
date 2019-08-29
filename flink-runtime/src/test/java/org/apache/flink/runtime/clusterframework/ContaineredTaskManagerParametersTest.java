@@ -20,13 +20,19 @@ package org.apache.flink.runtime.clusterframework;
 
 import org.apache.flink.configuration.ConfigConstants;
 import org.apache.flink.configuration.Configuration;
+import org.apache.flink.configuration.ResourceManagerOptions;
+import org.apache.flink.runtime.taskexecutor.TaskManagerServices;
 import org.apache.flink.util.TestLogger;
+
 import org.junit.Test;
 
 import static org.apache.flink.configuration.TaskManagerOptions.MEMORY_OFF_HEAP;
-import static org.apache.flink.runtime.taskexecutor.TaskManagerServices.calculateNetworkBufferMemory;
+import static org.hamcrest.Matchers.anyOf;
+import static org.hamcrest.Matchers.equalTo;
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertThat;
 import static org.junit.Assert.assertTrue;
+import static org.junit.Assert.fail;
 
 public class ContaineredTaskManagerParametersTest extends TestLogger {
 	private static final long CONTAINER_MEMORY = 8192L;
@@ -49,11 +55,19 @@ public class ContaineredTaskManagerParametersTest extends TestLogger {
 			ConfigConstants.DEFAULT_YARN_HEAP_CUTOFF);
 
 		long cutoff = Math.max((long) (CONTAINER_MEMORY * memoryCutoffRatio), minCutoff);
-		final long networkBufMB =
-			calculateNetworkBufferMemory(
-				(CONTAINER_MEMORY - cutoff) << 20, // megabytes to bytes
-				conf) >> 20; // bytes to megabytes
-		assertEquals(networkBufMB + cutoff, params.taskManagerDirectMemoryLimitMB());
+		final long networkBufMB = TaskManagerServices.getReservedNetworkMemory(
+			conf,
+			(CONTAINER_MEMORY - cutoff) << 20 // megabytes to bytes
+		) >> 20; // bytes to megabytes
+
+		// this is unfortunately necessary due to rounding errors that happen due to back and
+		// forth conversion between bytes and megabytes
+		// ideally all logic calculates precisely with bytes and we use coarser units only un
+		// user-facing configuration and parametrization classes
+		assertThat(networkBufMB + cutoff,
+			anyOf(
+				equalTo(params.taskManagerDirectMemoryLimitMB()),
+				equalTo(params.taskManagerDirectMemoryLimitMB() - 1)));
 	}
 
 	/**
@@ -90,5 +104,34 @@ public class ContaineredTaskManagerParametersTest extends TestLogger {
 
 		assertTrue(params.taskManagerHeapSizeMB() +
 			params.taskManagerDirectMemoryLimitMB() <= CONTAINER_MEMORY);
+	}
+
+	/**
+	 * Test to guard {@link ContaineredTaskManagerParameters#calculateCutoffMB(Configuration, long)}.
+	 */
+	@Test
+	public void testCalculateCutoffMB() {
+
+		Configuration config = new Configuration();
+		long containerMemoryMB = 1000L;
+
+		config.setFloat(ResourceManagerOptions.CONTAINERIZED_HEAP_CUTOFF_RATIO, 0.1f);
+		config.setInteger(ResourceManagerOptions.CONTAINERIZED_HEAP_CUTOFF_MIN, 128);
+
+		assertEquals(128,
+			ContaineredTaskManagerParameters.calculateCutoffMB(config, containerMemoryMB));
+
+		config.setFloat(ResourceManagerOptions.CONTAINERIZED_HEAP_CUTOFF_RATIO, 0.2f);
+		assertEquals(200,
+			ContaineredTaskManagerParameters.calculateCutoffMB(config, containerMemoryMB));
+
+		config.setInteger(ResourceManagerOptions.CONTAINERIZED_HEAP_CUTOFF_MIN, 1000);
+
+		try {
+			ContaineredTaskManagerParameters.calculateCutoffMB(config, containerMemoryMB);
+			fail("Expected to fail with an invalid argument exception.");
+		} catch (IllegalArgumentException ignored) {
+			// we expected it.
+		}
 	}
 }

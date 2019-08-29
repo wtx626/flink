@@ -22,6 +22,8 @@ import org.apache.flink.api.common.JobID;
 import org.apache.flink.api.common.state.ValueState;
 import org.apache.flink.api.common.state.ValueStateDescriptor;
 import org.apache.flink.api.common.typeutils.base.IntSerializer;
+import org.apache.flink.core.fs.CloseableRegistry;
+import org.apache.flink.metrics.groups.UnregisteredMetricsGroup;
 import org.apache.flink.queryablestate.KvStateID;
 import org.apache.flink.queryablestate.client.VoidNamespace;
 import org.apache.flink.queryablestate.client.VoidNamespaceSerializer;
@@ -40,6 +42,7 @@ import org.apache.flink.runtime.state.AbstractStateBackend;
 import org.apache.flink.runtime.state.KeyGroupRange;
 import org.apache.flink.runtime.state.internal.InternalKvState;
 import org.apache.flink.runtime.state.memory.MemoryStateBackend;
+import org.apache.flink.runtime.state.ttl.TtlTimeProvider;
 import org.apache.flink.util.ExceptionUtils;
 import org.apache.flink.util.NetUtils;
 
@@ -111,7 +114,8 @@ public class ClientTest {
 	@After
 	public void tearDown() throws Exception {
 		if (nioGroup != null) {
-			nioGroup.shutdownGracefully();
+			// note: no "quiet period" to not trigger Netty#4357
+			nioGroup.shutdownGracefully(0, 10, TimeUnit.SECONDS);
 		}
 	}
 
@@ -629,13 +633,17 @@ public class ClientTest {
 		dummyEnv.setKvStateRegistry(dummyRegistry);
 
 		AbstractKeyedStateBackend<Integer> backend = abstractBackend.createKeyedStateBackend(
-				dummyEnv,
-				new JobID(),
-				"test_op",
-				IntSerializer.INSTANCE,
-				numKeyGroups,
-				new KeyGroupRange(0, 0),
-				dummyRegistry.createTaskRegistry(new JobID(), new JobVertexID()));
+			dummyEnv,
+			new JobID(),
+			"test_op",
+			IntSerializer.INSTANCE,
+			numKeyGroups,
+			new KeyGroupRange(0, 0),
+			dummyRegistry.createTaskRegistry(new JobID(), new JobVertexID()),
+			TtlTimeProvider.DEFAULT,
+			new UnregisteredMetricsGroup(),
+			Collections.emptyList(),
+			new CloseableRegistry());
 
 		final FiniteDuration timeout = new FiniteDuration(10, TimeUnit.SECONDS);
 
@@ -684,8 +692,8 @@ public class ClientTest {
 
 				state.update(201 + i);
 
-				// we know it must be a KvStat but this is not exposed to the user via State
-				InternalKvState<?> kvState = (InternalKvState<?>) state;
+				// we know it must be a KvState but this is not exposed to the user via State
+				InternalKvState<Integer, ?, Integer> kvState = (InternalKvState<Integer, ?, Integer>) state;
 
 				// Register KvState (one state instance for all server)
 				ids[i] = registry[i].registerKvState(new JobID(), new JobVertexID(), new KeyGroupRange(0, 0), "any", kvState);

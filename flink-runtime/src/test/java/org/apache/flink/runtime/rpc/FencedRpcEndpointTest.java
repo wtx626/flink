@@ -23,7 +23,6 @@ import org.apache.flink.core.testutils.OneShotLatch;
 import org.apache.flink.runtime.messages.Acknowledge;
 import org.apache.flink.runtime.rpc.exceptions.FencingTokenException;
 import org.apache.flink.runtime.rpc.exceptions.RpcException;
-import org.apache.flink.testutils.category.Flip6;
 import org.apache.flink.util.ExceptionUtils;
 import org.apache.flink.util.FlinkException;
 import org.apache.flink.util.TestLogger;
@@ -31,7 +30,6 @@ import org.apache.flink.util.TestLogger;
 import org.junit.AfterClass;
 import org.junit.BeforeClass;
 import org.junit.Test;
-import org.junit.experimental.categories.Category;
 
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
@@ -41,12 +39,12 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotEquals;
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.fail;
 
-@Category(Flip6.class)
 public class FencedRpcEndpointTest extends TestLogger {
 
 	private static final Time timeout = Time.seconds(10L);
@@ -60,8 +58,7 @@ public class FencedRpcEndpointTest extends TestLogger {
 	@AfterClass
 	public static void teardown() throws ExecutionException, InterruptedException, TimeoutException {
 		if (rpcService != null) {
-			rpcService.stopService();
-			rpcService.getTerminationFuture().get(timeout.toMilliseconds(), TimeUnit.MILLISECONDS);
+			RpcUtils.terminateRpcService(rpcService, timeout);
 		}
 	}
 
@@ -84,13 +81,15 @@ public class FencedRpcEndpointTest extends TestLogger {
 
 			final UUID newFencingToken = UUID.randomUUID();
 
+			boolean failed = false;
 			try {
 				fencedTestingEndpoint.setFencingToken(newFencingToken);
-				fail("Fencing token can only be set from within the main thread.");
+				failed = true;
 			} catch (AssertionError ignored) {
 				// expected to fail
 			}
 
+			assertFalse("Setting fencing token from outside the main thread did not fail as expected.", failed);
 			assertNull(fencedTestingEndpoint.getFencingToken());
 
 			CompletableFuture<Acknowledge> setFencingFuture = fencedTestingEndpoint.setFencingTokenInMainThread(newFencingToken, timeout);
@@ -102,8 +101,7 @@ public class FencedRpcEndpointTest extends TestLogger {
 			assertEquals(newFencingToken, fencedGateway.getFencingToken());
 			assertEquals(newFencingToken, fencedTestingEndpoint.getFencingToken());
 		} finally {
-			fencedTestingEndpoint.shutDown();
-			fencedTestingEndpoint.getTerminationFuture().get(timeout.toMilliseconds(), TimeUnit.MILLISECONDS);
+			RpcUtils.terminateRpcEndpoint(fencedTestingEndpoint, timeout);
 		}
 	}
 
@@ -151,8 +149,7 @@ public class FencedRpcEndpointTest extends TestLogger {
 			}
 
 		} finally {
-			fencedTestingEndpoint.shutDown();
-			fencedTestingEndpoint.getTerminationFuture().get(timeout.toMilliseconds(), TimeUnit.MILLISECONDS);
+			RpcUtils.terminateRpcEndpoint(fencedTestingEndpoint, timeout);
 		}
 	}
 
@@ -198,8 +195,7 @@ public class FencedRpcEndpointTest extends TestLogger {
 				assertTrue(ExceptionUtils.stripExecutionException(e) instanceof FencingTokenException);
 			}
 		} finally {
-			fencedTestingEndpoint.shutDown();
-			fencedTestingEndpoint.getTerminationFuture().get(timeout.toMilliseconds(), TimeUnit.MILLISECONDS);
+			RpcUtils.terminateRpcEndpoint(fencedTestingEndpoint, timeout);
 		}
 	}
 
@@ -242,8 +238,7 @@ public class FencedRpcEndpointTest extends TestLogger {
 			}
 
 		} finally {
-			fencedTestingEndpoint.shutDown();
-			fencedTestingEndpoint.getTerminationFuture().get(timeout.toMilliseconds(), TimeUnit.MILLISECONDS);
+			RpcUtils.terminateRpcEndpoint(fencedTestingEndpoint, timeout);
 		}
 	}
 
@@ -278,8 +273,7 @@ public class FencedRpcEndpointTest extends TestLogger {
 				// we should not be able to call getFencingToken on an unfenced gateway
 			}
 		} finally {
-			fencedTestingEndpoint.shutDown();
-			fencedTestingEndpoint.getTerminationFuture().get(timeout.toMilliseconds(), TimeUnit.MILLISECONDS);
+			RpcUtils.terminateRpcEndpoint(fencedTestingEndpoint, timeout);
 		}
 	}
 

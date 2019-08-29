@@ -27,6 +27,7 @@ import org.apache.flink.queryablestate.network.stats.DisabledKvStateRequestStats
 import org.apache.flink.queryablestate.network.stats.KvStateRequestStats;
 import org.apache.flink.util.FlinkRuntimeException;
 import org.apache.flink.util.Preconditions;
+import org.apache.flink.util.TestLogger;
 
 import org.apache.flink.shaded.netty4.io.netty.buffer.ByteBuf;
 
@@ -43,11 +44,13 @@ import java.util.Collections;
 import java.util.Iterator;
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
+import java.util.stream.Collectors;
+import java.util.stream.IntStream;
 
 /**
  * Tests general behavior of the {@link AbstractServerBase}.
  */
-public class AbstractServerTest {
+public class AbstractServerTest extends TestLogger {
 
 	@Rule
 	public ExpectedException expectedEx = ExpectedException.none();
@@ -87,10 +90,9 @@ public class AbstractServerTest {
 		AtomicKvStateRequestStats serverStats = new AtomicKvStateRequestStats();
 		AtomicKvStateRequestStats clientStats = new AtomicKvStateRequestStats();
 
-		List<Integer> portList = new ArrayList<>();
-		portList.add(7777);
-		portList.add(7778);
-		portList.add(7779);
+		final int portRangeStart = 7777;
+		final int portRangeEnd = 7900;
+		List<Integer> portList = IntStream.range(portRangeStart, portRangeEnd + 1).boxed().collect(Collectors.toList());
 
 		try (
 				TestServer server1 = new TestServer("Test Server 1", serverStats, portList.iterator());
@@ -103,10 +105,10 @@ public class AbstractServerTest {
 				)
 		) {
 			server1.start();
-			Assert.assertTrue(server1.getServerAddress().getPort() >= 7777 && server1.getServerAddress().getPort() <= 7779);
+			Assert.assertTrue(server1.getServerAddress().getPort() >= portRangeStart && server1.getServerAddress().getPort() <= portRangeEnd);
 
 			server2.start();
-			Assert.assertTrue(server2.getServerAddress().getPort() >= 7777 && server2.getServerAddress().getPort() <= 7779);
+			Assert.assertTrue(server2.getServerAddress().getPort() >= portRangeStart && server2.getServerAddress().getPort() <= portRangeEnd);
 
 			TestMessage response1 = client.sendRequest(server1.getServerAddress(), new TestMessage("ping")).join();
 			Assert.assertEquals(server1.getServerName() + "-ping", response1.getMessage());

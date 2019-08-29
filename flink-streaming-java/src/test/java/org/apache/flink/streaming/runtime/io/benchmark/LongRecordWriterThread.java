@@ -34,6 +34,7 @@ import static org.apache.flink.util.Preconditions.checkState;
  */
 public class LongRecordWriterThread extends CheckedThread {
 	private final RecordWriter<LongValue> recordWriter;
+	private final boolean broadcastMode;
 
 	/**
 	 * Future to wait on a definition of the number of records to send.
@@ -42,11 +43,14 @@ public class LongRecordWriterThread extends CheckedThread {
 
 	private volatile boolean running = true;
 
-	public LongRecordWriterThread(RecordWriter<LongValue> recordWriter) {
+	public LongRecordWriterThread(
+			RecordWriter<LongValue> recordWriter,
+			boolean broadcastMode) {
 		this.recordWriter = checkNotNull(recordWriter);
+		this.broadcastMode = broadcastMode;
 	}
 
-	public void shutdown() {
+	public synchronized void shutdown() {
 		running = false;
 		recordsToSend.complete(0L);
 	}
@@ -74,8 +78,13 @@ public class LongRecordWriterThread extends CheckedThread {
 
 	@Override
 	public void go() throws Exception {
-		while (running) {
-			sendRecords(getRecordsToSend().get());
+		try {
+			while (running) {
+				sendRecords(getRecordsToSend().get());
+			}
+		}
+		finally {
+			recordWriter.close();
 		}
 	}
 
@@ -83,11 +92,16 @@ public class LongRecordWriterThread extends CheckedThread {
 		LongValue value = new LongValue(0);
 
 		for (int i = 1; i < records; i++) {
-			recordWriter.emit(value);
+			if (broadcastMode) {
+				recordWriter.broadcastEmit(value);
+			}
+			else {
+				recordWriter.emit(value);
+			}
 		}
 		value.setValue(records);
 		recordWriter.broadcastEmit(value);
-		recordWriter.flush();
+		recordWriter.flushAll();
 
 		finishSendingRecords();
 	}

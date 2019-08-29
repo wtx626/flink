@@ -21,23 +21,24 @@ package org.apache.flink.mesos.scheduler
 import java.util.{Collections, UUID}
 import java.util.concurrent.atomic.AtomicReference
 
+import akka.actor.ActorSystem
 import akka.actor.FSM.StateTimeout
 import akka.testkit._
 import com.netflix.fenzo.TaskRequest.{AssignedResources, NamedResourceSetRequest}
 import com.netflix.fenzo._
 import com.netflix.fenzo.functions.{Action1, Action2}
-import org.apache.flink.api.java.tuple.{Tuple2=>FlinkTuple2}
+import org.apache.flink.api.java.tuple.{Tuple2 => FlinkTuple2}
 import org.apache.flink.configuration.Configuration
 import org.apache.flink.mesos.scheduler.LaunchCoordinator._
 import org.apache.flink.mesos.scheduler.messages._
 import org.apache.flink.runtime.akka.AkkaUtils
 import org.apache.mesos.Protos.{SlaveID, TaskInfo}
-import org.apache.mesos.{SchedulerDriver, Protos}
+import org.apache.mesos.{Protos, SchedulerDriver}
 import org.junit.runner.RunWith
 import org.mockito.Mockito.{verify, _}
 import org.mockito.invocation.InvocationOnMock
 import org.mockito.stubbing.Answer
-import org.mockito.{Matchers => MM, Mockito}
+import org.mockito.{ArgumentMatchers => MM, Mockito}
 import org.scalatest.junit.JUnitRunner
 import org.scalatest.{BeforeAndAfterAll, Matchers, WordSpecLike}
 
@@ -56,8 +57,8 @@ class LaunchCoordinatorTest
     with Matchers
     with BeforeAndAfterAll {
 
-  lazy val config = new Configuration()
-  implicit lazy val system = AkkaUtils.createLocalActorSystem(config)
+  lazy val config: Configuration = new Configuration()
+  implicit lazy val system: ActorSystem = AkkaUtils.createLocalActorSystem(config)
 
   override def afterAll(): Unit = {
     TestKit.shutdownActorSystem(system)
@@ -80,6 +81,7 @@ class LaunchCoordinatorTest
         override def getNetworkMbps: Double = 0.0
         override def getDisk: Double = 0.0
         override def getPorts: Int = 1
+        override def getScalarRequests = Collections.singletonMap("gpus", 1.0)
         override def getCustomNamedResources: java.util.Map[String, NamedResourceSetRequest] =
           Collections.emptyMap[String, NamedResourceSetRequest]
         override def getSoftConstraints: java.util.List[_ <: VMTaskFitnessCalculator] = null

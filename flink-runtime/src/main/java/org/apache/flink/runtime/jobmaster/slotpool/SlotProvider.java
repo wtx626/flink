@@ -18,16 +18,20 @@
 
 package org.apache.flink.runtime.jobmaster.slotpool;
 
-import org.apache.flink.runtime.jobmaster.LogicalSlot;
+import org.apache.flink.api.common.time.Time;
+import org.apache.flink.runtime.clusterframework.types.SlotProfile;
+import org.apache.flink.runtime.instance.SlotSharingGroupId;
 import org.apache.flink.runtime.jobmanager.scheduler.ScheduledUnit;
-import org.apache.flink.runtime.taskmanager.TaskManagerLocation;
+import org.apache.flink.runtime.jobmaster.LogicalSlot;
+import org.apache.flink.runtime.jobmaster.SlotRequestId;
 
-import java.util.Collection;
+import javax.annotation.Nullable;
+
 import java.util.concurrent.CompletableFuture;
 
 /**
  * The slot provider is responsible for preparing slots for ready-to-run tasks.
- * 
+ *
  * <p>It supports two allocating modes:
  * <ul>
  *     <li>Immediate allocating: A request for a task slot immediately gets satisfied, we can call
@@ -41,13 +45,68 @@ public interface SlotProvider {
 	/**
 	 * Allocating slot with specific requirement.
 	 *
-	 * @param task         The task to allocate the slot for
-	 * @param allowQueued  Whether allow the task be queued if we do not have enough resource
-	 * @param preferredLocations preferred locations for the slot allocation
+	 * @param slotRequestId identifying the slot request
+	 * @param scheduledUnit The task to allocate the slot for
+	 * @param slotProfile profile of the requested slot
+	 * @param allowQueuedScheduling Whether allow the task be queued if we do not have enough resource
+	 * @param allocationTimeout after which the allocation fails with a timeout exception
 	 * @return The future of the allocation
 	 */
 	CompletableFuture<LogicalSlot> allocateSlot(
-		ScheduledUnit task,
+		SlotRequestId slotRequestId,
+		ScheduledUnit scheduledUnit,
+		SlotProfile slotProfile,
+		boolean allowQueuedScheduling,
+		Time allocationTimeout);
+
+	/**
+	 * Allocating batch slot with specific requirement.
+	 *
+	 * @param slotRequestId identifying the slot request
+	 * @param scheduledUnit The task to allocate the slot for
+	 * @param slotProfile profile of the requested slot
+	 * @param allowQueuedScheduling Whether allow the task be queued if we do not have enough resource
+	 * @return The future of the allocation
+	 */
+	default CompletableFuture<LogicalSlot> allocateBatchSlot(
+		SlotRequestId slotRequestId,
+		ScheduledUnit scheduledUnit,
+		SlotProfile slotProfile,
+		boolean allowQueuedScheduling) {
+		throw new UnsupportedOperationException("Not properly implemented.");
+	}
+
+	/**
+	 * Allocating slot with specific requirement.
+	 *
+	 * @param scheduledUnit The task to allocate the slot for
+	 * @param allowQueued Whether allow the task be queued if we do not have enough resource
+	 * @param slotProfile profile of the requested slot
+	 * @param allocationTimeout after which the allocation fails with a timeout exception
+	 * @return The future of the allocation
+	 */
+	default CompletableFuture<LogicalSlot> allocateSlot(
+		ScheduledUnit scheduledUnit,
 		boolean allowQueued,
-		Collection<TaskManagerLocation> preferredLocations);
+		SlotProfile slotProfile,
+		Time allocationTimeout) {
+		return allocateSlot(
+			new SlotRequestId(),
+			scheduledUnit,
+			slotProfile,
+			allowQueued,
+			allocationTimeout);
+	}
+
+	/**
+	 * Cancels the slot request with the given {@link SlotRequestId} and {@link SlotSharingGroupId}.
+	 *
+	 * @param slotRequestId identifying the slot request to cancel
+	 * @param slotSharingGroupId identifying the slot request to cancel
+	 * @param cause of the cancellation
+	 */
+	void cancelSlotRequest(
+		SlotRequestId slotRequestId,
+		@Nullable SlotSharingGroupId slotSharingGroupId,
+		Throwable cause);
 }

@@ -19,19 +19,21 @@
 package org.apache.flink.runtime.blob;
 
 import org.apache.flink.api.common.JobID;
+import org.apache.flink.configuration.BlobServerOptions;
 import org.apache.flink.configuration.Configuration;
+import org.apache.flink.configuration.ConfigurationUtils;
 import org.apache.flink.configuration.HighAvailabilityOptions;
 import org.apache.flink.configuration.IllegalConfigurationException;
 import org.apache.flink.core.fs.FileSystem;
 import org.apache.flink.core.fs.Path;
 import org.apache.flink.runtime.jobmanager.HighAvailabilityMode;
+import org.apache.flink.util.InstantiationUtil;
 import org.apache.flink.util.StringUtils;
 
 import org.slf4j.Logger;
 
 import javax.annotation.Nullable;
 
-import java.io.Closeable;
 import java.io.EOFException;
 import java.io.File;
 import java.io.IOException;
@@ -42,9 +44,9 @@ import java.nio.file.FileAlreadyExistsException;
 import java.nio.file.Files;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
+import java.util.Random;
 import java.util.UUID;
 
-import static org.apache.flink.util.Preconditions.checkNotNull;
 import static org.apache.flink.util.StringUtils.isNullOrWhitespaceOnly;
 
 /**
@@ -72,6 +74,8 @@ public class BlobUtils {
 	 */
 	static final String NO_JOB_DIR_PREFIX = "no_job";
 
+	private static final Random RANDOM = new Random();
+
 	/**
 	 * Creates a BlobStore based on the parameters set in the configuration.
 	 *
@@ -84,14 +88,10 @@ public class BlobUtils {
 	 * 		thrown if the (distributed) file storage cannot be created
 	 */
 	public static BlobStoreService createBlobStoreFromConfig(Configuration config) throws IOException {
-		HighAvailabilityMode highAvailabilityMode = HighAvailabilityMode.fromConfig(config);
-
-		if (highAvailabilityMode == HighAvailabilityMode.NONE) {
-			return new VoidBlobStore();
-		} else if (highAvailabilityMode == HighAvailabilityMode.ZOOKEEPER) {
+		if (HighAvailabilityMode.isHighAvailabilityModeActivated(config)) {
 			return createFileSystemBlobStore(config);
 		} else {
-			throw new IllegalConfigurationException("Unexpected high availability mode '" + highAvailabilityMode + "'.");
+			return new VoidBlobStore();
 		}
 	}
 
@@ -127,21 +127,28 @@ public class BlobUtils {
 	}
 
 	/**
-	 * Creates a local storage directory for a blob service under the given parent directory.
+	 * Creates a local storage directory for a blob service under the configuration parameter given
+	 * by {@link BlobServerOptions#STORAGE_DIRECTORY}. If this is <tt>null</tt> or empty, we will
+	 * fall back to Flink's temp directories (given by
+	 * {@link org.apache.flink.configuration.CoreOptions#TMP_DIRS}) and choose one among them at
+	 * random.
 	 *
-	 * @param basePath
-	 * 		base path, i.e. parent directory, of the storage directory to use (if <tt>null</tt> or
-	 * 		empty, the path in <tt>java.io.tmpdir</tt> will be used)
+	 * @param config
+	 * 		Flink configuration
 	 *
 	 * @return a new local storage directory
 	 *
 	 * @throws IOException
 	 * 		thrown if the local file storage cannot be created or is not usable
 	 */
-	static File initLocalStorageDirectory(String basePath) throws IOException {
+	static File initLocalStorageDirectory(Configuration config) throws IOException {
+
+		String basePath = config.getString(BlobServerOptions.STORAGE_DIRECTORY);
+
 		File baseDir;
 		if (StringUtils.isNullOrWhitespaceOnly(basePath)) {
-			baseDir = new File(System.getProperty("java.io.tmpdir"));
+			final String[] tmpDirPaths = ConfigurationUtils.parseTempDirectories(config);
+			baseDir = new File(tmpDirPaths[RANDOM.nextInt(tmpDirPaths.length)]);
 		}
 		else {
 			baseDir = new File(basePath);
@@ -181,27 +188,9 @@ public class BlobUtils {
 	static File getIncomingDirectory(File storageDir) throws IOException {
 		final File incomingDir = new File(storageDir, "incoming");
 
-		mkdirTolerateExisting(incomingDir);
+		Files.createDirectories(incomingDir.toPath());
 
 		return incomingDir;
-	}
-
-	/**
-	 * Makes sure a given directory exists by creating it if necessary.
-	 *
-	 * @param dir
-	 * 		directory to create
-	 *
-	 * @throws IOException
-	 * 		if creating the directory fails
-	 */
-	private static void mkdirTolerateExisting(final File dir) throws IOException {
-		// note: thread-safe create should try to mkdir first and then ignore the case that the
-		//       directory already existed
-		if (!dir.mkdirs() && !dir.exists()) {
-			throw new IOException(
-				"Cannot create directory '" + dir.getAbsolutePath() + "'.");
-		}
 	}
 
 	/**
@@ -223,7 +212,7 @@ public class BlobUtils {
 			File storageDir, @Nullable JobID jobId, BlobKey key) throws IOException {
 		File file = new File(getStorageLocationPath(storageDir.getAbsolutePath(), jobId, key));
 
-		mkdirTolerateExisting(file.getParentFile());
+		Files.createDirectories(file.getParentFile().toPath());
 
 		return file;
 	}
@@ -292,40 +281,6 @@ public class BlobUtils {
 	}
 
 	/**
-	 * Adds a shutdown hook to the JVM and returns the Thread, which has been registered.
-	 */
-	static Thread addShutdownHook(final Closeable service, final Logger logger) {
-		checkNotNull(service);
-		checkNotNull(logger);
-
-		final Thread shutdownHook = new Thread(new Runnable() {
-			@Override
-			public void run() {
-				try {
-					service.close();
-				}
-				catch (Throwable t) {
-					logger.error("Error during shutdown of blob service via JVM shutdown hook.", t);
-				}
-			}
-		});
-
-		try {
-			// Add JVM shutdown hook to call shutdown of service
-			Runtime.getRuntime().addShutdownHook(shutdownHook);
-			return shutdownHook;
-		}
-		catch (IllegalStateException e) {
-			// JVM is already shutting down. no need to do our work
-			return null;
-		}
-		catch (Throwable t) {
-			logger.error("Cannot register shutdown hook that cleanly terminates the BLOB service.");
-			return null;
-		}
-	}
-
-	/**
 	 * Auxiliary method to write the length of an upcoming data chunk to an
 	 * output stream.
 	 *
@@ -374,6 +329,28 @@ public class BlobUtils {
 		bytesRead |= (buf[3] & 0xff) << 24;
 
 		return bytesRead;
+	}
+
+	/**
+	 * Reads exception from given {@link InputStream}.
+	 *
+	 * @param in the input stream to read from
+	 * @return exception that was read
+	 * @throws IOException thrown if an I/O error occurs while reading from the input
+	 *                     stream
+	 */
+	static Throwable readExceptionFromStream(InputStream in) throws IOException {
+		int len = readLength(in);
+		byte[] bytes = new byte[len];
+		readFully(in, bytes, 0, len, "Error message");
+
+		try {
+			return (Throwable) InstantiationUtil.deserializeObject(bytes, ClassLoader.getSystemClassLoader());
+		}
+		catch (ClassNotFoundException e) {
+			// should never occur
+			throw new IOException("Could not transfer error message", e);
+		}
 	}
 
 	/**

@@ -18,30 +18,60 @@
 
 package org.apache.flink.runtime.io.network.partition;
 
+/**
+ * Type of a result partition.
+ */
 public enum ResultPartitionType {
 
+	/**
+	 * Blocking partitions represent blocking data exchanges, where the data stream is first
+	 * fully produced and then consumed. This is an option that is only applicable to bounded
+	 * streams and can be used in bounded stream runtime and recovery.
+	 *
+	 * <p>Blocking partitions can be consumed multiple times and concurrently.
+	 *
+	 * <p>The partition is not automatically released after being consumed (like for example the
+	 * {@link #PIPELINED} partitions), but only released through the scheduler, when it determines
+	 * that the partition is no longer needed.
+	 */
 	BLOCKING(false, false, false, false),
 
+	/**
+	 * BLOCKING_PERSISTENT partitions are similar to {@link #BLOCKING} partitions, but have
+	 * a user-specified life cycle.
+	 *
+	 * <p>BLOCKING_PERSISTENT partitions are dropped upon explicit API calls to the
+	 * JobManager or ResourceManager, rather than by the scheduler.
+	 *
+	 * <p>Otherwise, the partition may only be dropped by safety-nets during failure handling
+	 * scenarios, like when the TaskManager exits or when the TaskManager looses connection
+	 * to JobManager / ResourceManager for too long.
+	 */
+	BLOCKING_PERSISTENT(false, false, false, true),
+
+	/**
+	 * A pipelined streaming data exchange. This is applicable to both bounded and unbounded streams.
+	 *
+	 * <p>Pipelined results can be consumed only once by a single consumer and are automatically
+	 * disposed when the stream has been consumed.
+	 *
+	 * <p>This result partition type may keep an arbitrary amount of data in-flight, in contrast to
+	 * the {@link #PIPELINED_BOUNDED} variant.
+	 */
 	PIPELINED(true, true, false, false),
 
 	/**
 	 * Pipelined partitions with a bounded (local) buffer pool.
 	 *
-	 * For streaming jobs, a fixed limit on the buffer pool size should help avoid that too much
+	 * <p>For streaming jobs, a fixed limit on the buffer pool size should help avoid that too much
 	 * data is being buffered and checkpoint barriers are delayed. In contrast to limiting the
 	 * overall network buffer pool size, this, however, still allows to be flexible with regards
 	 * to the total number of partitions by selecting an appropriately big network buffer pool size.
 	 *
-	 * For batch jobs, it will be best to keep this unlimited ({@link #PIPELINED}) since there are
+	 * <p>For batch jobs, it will be best to keep this unlimited ({@link #PIPELINED}) since there are
 	 * no checkpoint barriers.
 	 */
-	PIPELINED_BOUNDED(true, true, true, false),
-
-	/**
-	 * Pipelined partitions with a bounded (local) buffer pool for floating buffers in input gate, and a number
-	 * of exclusive buffers per input channel. The producer transfers data based on consumer's available credits.
-	 */
-	PIPELINED_CREDIT_BASED(true, true, true, true);
+	PIPELINED_BOUNDED(true, true, true, false);
 
 	/** Can the partition be consumed while being produced? */
 	private final boolean isPipelined;
@@ -52,17 +82,17 @@ public enum ResultPartitionType {
 	/** Does this partition use a limited number of (network) buffers? */
 	private final boolean isBounded;
 
-	/** Does this partition only send data when consumer has available buffers? */
-	private final boolean isCreditBased;
+	/** This partition will not be released after consuming if 'isPersistent' is true. */
+	private final boolean isPersistent;
 
 	/**
 	 * Specifies the behaviour of an intermediate result partition at runtime.
 	 */
-	ResultPartitionType(boolean isPipelined, boolean hasBackPressure, boolean isBounded, boolean isCreditBased) {
+	ResultPartitionType(boolean isPipelined, boolean hasBackPressure, boolean isBounded, boolean isPersistent) {
 		this.isPipelined = isPipelined;
 		this.hasBackPressure = hasBackPressure;
 		this.isBounded = isBounded;
-		this.isCreditBased = isCreditBased;
+		this.isPersistent = isPersistent;
 	}
 
 	public boolean hasBackPressure() {
@@ -86,12 +116,7 @@ public enum ResultPartitionType {
 		return isBounded;
 	}
 
-	/**
-	 * Whether this partition uses the credit-based mode to transfer data or not.
-	 *
-	 * @return <tt>true</tt> if the data is transferred based on consumer's credit
-	 */
-	public boolean isCreditBased() {
-		return isCreditBased;
+	public boolean isPersistent() {
+		return isPersistent;
 	}
 }

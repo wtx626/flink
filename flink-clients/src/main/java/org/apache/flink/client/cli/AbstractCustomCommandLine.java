@@ -18,11 +18,11 @@
 
 package org.apache.flink.client.cli;
 
-import org.apache.flink.client.ClientUtils;
 import org.apache.flink.configuration.Configuration;
 import org.apache.flink.configuration.HighAvailabilityOptions;
 import org.apache.flink.configuration.UnmodifiableConfiguration;
 import org.apache.flink.util.FlinkException;
+import org.apache.flink.util.NetUtils;
 import org.apache.flink.util.Preconditions;
 
 import org.apache.commons.cli.CommandLine;
@@ -73,14 +73,14 @@ public abstract class AbstractCustomCommandLine<T> implements CustomCommandLine<
 	 * Override configuration settings by specified command line options.
 	 *
 	 * @param commandLine containing the overriding values
-	 * @return Effective configuration with the overriden configuration settings
+	 * @return Effective configuration with the overridden configuration settings
 	 */
 	protected Configuration applyCommandLineOptionsToConfiguration(CommandLine commandLine) throws FlinkException {
 		final Configuration resultingConfiguration = new Configuration(configuration);
 
 		if (commandLine.hasOption(addressOption.getOpt())) {
 			String addressWithPort = commandLine.getOptionValue(addressOption.getOpt());
-			InetSocketAddress jobManagerAddress = ClientUtils.parseHostPortAddress(addressWithPort);
+			InetSocketAddress jobManagerAddress = NetUtils.parseHostPortAddress(addressWithPort);
 			setJobManagerAddressInConfig(resultingConfiguration, jobManagerAddress);
 		}
 

@@ -18,7 +18,9 @@
 package org.apache.flink.streaming.connectors.kafka;
 
 import org.apache.flink.annotation.PublicEvolving;
+import org.apache.flink.api.common.io.ratelimiting.FlinkConnectorRateLimiter;
 import org.apache.flink.api.common.serialization.DeserializationSchema;
+import org.apache.flink.metrics.MetricGroup;
 import org.apache.flink.streaming.api.functions.AssignerWithPeriodicWatermarks;
 import org.apache.flink.streaming.api.functions.AssignerWithPunctuatedWatermarks;
 import org.apache.flink.streaming.api.operators.StreamingRuntimeContext;
@@ -27,10 +29,9 @@ import org.apache.flink.streaming.connectors.kafka.internal.Kafka09Fetcher;
 import org.apache.flink.streaming.connectors.kafka.internal.Kafka09PartitionDiscoverer;
 import org.apache.flink.streaming.connectors.kafka.internals.AbstractFetcher;
 import org.apache.flink.streaming.connectors.kafka.internals.AbstractPartitionDiscoverer;
+import org.apache.flink.streaming.connectors.kafka.internals.KafkaDeserializationSchemaWrapper;
 import org.apache.flink.streaming.connectors.kafka.internals.KafkaTopicPartition;
 import org.apache.flink.streaming.connectors.kafka.internals.KafkaTopicsDescriptor;
-import org.apache.flink.streaming.util.serialization.KeyedDeserializationSchema;
-import org.apache.flink.streaming.util.serialization.KeyedDeserializationSchemaWrapper;
 import org.apache.flink.util.PropertiesUtil;
 import org.apache.flink.util.SerializedValue;
 
@@ -39,6 +40,7 @@ import org.apache.kafka.common.serialization.ByteArrayDeserializer;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.util.Collection;
 import java.util.Collections;
 import java.util.List;
 import java.util.Map;
@@ -46,6 +48,7 @@ import java.util.Properties;
 import java.util.regex.Pattern;
 
 import static org.apache.flink.util.Preconditions.checkNotNull;
+import static org.apache.flink.util.PropertiesUtil.getBoolean;
 import static org.apache.flink.util.PropertiesUtil.getLong;
 
 /**
@@ -88,6 +91,11 @@ public class FlinkKafkaConsumer09<T> extends FlinkKafkaConsumerBase<T> {
 	 * available. If 0, returns immediately with any records that are available now */
 	protected final long pollTimeout;
 
+	/**
+	 * RateLimiter to throttle bytes read from Kafka. The rateLimiter is set via
+	 * {@link #setRateLimiter(FlinkConnectorRateLimiter)}.
+	 */
+	private FlinkConnectorRateLimiter rateLimiter;
 	// ------------------------------------------------------------------------
 
 	/**
@@ -107,7 +115,7 @@ public class FlinkKafkaConsumer09<T> extends FlinkKafkaConsumerBase<T> {
 	/**
 	 * Creates a new Kafka streaming source consumer for Kafka 0.9.x
 	 *
-	 * <p>This constructor allows passing a {@see KeyedDeserializationSchema} for reading key/value
+	 * <p>This constructor allows passing a {@see KafkaDeserializationSchema} for reading key/value
 	 * pairs, offsets, and topic names from Kafka.
 	 *
 	 * @param topic
@@ -117,7 +125,7 @@ public class FlinkKafkaConsumer09<T> extends FlinkKafkaConsumerBase<T> {
 	 * @param props
 	 *           The properties used to configure the Kafka consumer client, and the ZooKeeper client.
 	 */
-	public FlinkKafkaConsumer09(String topic, KeyedDeserializationSchema<T> deserializer, Properties props) {
+	public FlinkKafkaConsumer09(String topic, KafkaDeserializationSchema<T> deserializer, Properties props) {
 		this(Collections.singletonList(topic), deserializer, props);
 	}
 
@@ -134,7 +142,7 @@ public class FlinkKafkaConsumer09<T> extends FlinkKafkaConsumerBase<T> {
 	 *           The properties that are used to configure both the fetcher and the offset handler.
 	 */
 	public FlinkKafkaConsumer09(List<String> topics, DeserializationSchema<T> deserializer, Properties props) {
-		this(topics, new KeyedDeserializationSchemaWrapper<>(deserializer), props);
+		this(topics, new KafkaDeserializationSchemaWrapper<>(deserializer), props);
 	}
 
 	/**
@@ -149,7 +157,7 @@ public class FlinkKafkaConsumer09<T> extends FlinkKafkaConsumerBase<T> {
 	 * @param props
 	 *           The properties that are used to configure both the fetcher and the offset handler.
 	 */
-	public FlinkKafkaConsumer09(List<String> topics, KeyedDeserializationSchema<T> deserializer, Properties props) {
+	public FlinkKafkaConsumer09(List<String> topics, KafkaDeserializationSchema<T> deserializer, Properties props) {
 		this(topics, null, deserializer, props);
 	}
 
@@ -170,7 +178,7 @@ public class FlinkKafkaConsumer09<T> extends FlinkKafkaConsumerBase<T> {
 	 */
 	@PublicEvolving
 	public FlinkKafkaConsumer09(Pattern subscriptionPattern, DeserializationSchema<T> valueDeserializer, Properties props) {
-		this(subscriptionPattern, new KeyedDeserializationSchemaWrapper<>(valueDeserializer), props);
+		this(subscriptionPattern, new KafkaDeserializationSchemaWrapper<>(valueDeserializer), props);
 	}
 
 	/**
@@ -181,7 +189,7 @@ public class FlinkKafkaConsumer09<T> extends FlinkKafkaConsumerBase<T> {
 	 * {@link FlinkKafkaConsumer09#KEY_PARTITION_DISCOVERY_INTERVAL_MILLIS} in the properties), topics
 	 * with names matching the pattern will also be subscribed to as they are created on the fly.
 	 *
-	 * <p>This constructor allows passing a {@see KeyedDeserializationSchema} for reading key/value
+	 * <p>This constructor allows passing a {@see KafkaDeserializationSchema} for reading key/value
 	 * pairs, offsets, and topic names from Kafka.
 	 *
 	 * @param subscriptionPattern
@@ -192,14 +200,14 @@ public class FlinkKafkaConsumer09<T> extends FlinkKafkaConsumerBase<T> {
 	 *           The properties used to configure the Kafka consumer client, and the ZooKeeper client.
 	 */
 	@PublicEvolving
-	public FlinkKafkaConsumer09(Pattern subscriptionPattern, KeyedDeserializationSchema<T> deserializer, Properties props) {
+	public FlinkKafkaConsumer09(Pattern subscriptionPattern, KafkaDeserializationSchema<T> deserializer, Properties props) {
 		this(null, subscriptionPattern, deserializer, props);
 	}
 
 	private FlinkKafkaConsumer09(
 			List<String> topics,
 			Pattern subscriptionPattern,
-			KeyedDeserializationSchema<T> deserializer,
+			KafkaDeserializationSchema<T> deserializer,
 			Properties props) {
 
 		super(
@@ -208,7 +216,8 @@ public class FlinkKafkaConsumer09<T> extends FlinkKafkaConsumerBase<T> {
 				deserializer,
 				getLong(
 					checkNotNull(props, "props"),
-					KEY_PARTITION_DISCOVERY_INTERVAL_MILLIS, PARTITION_DISCOVERY_DISABLED));
+					KEY_PARTITION_DISCOVERY_INTERVAL_MILLIS, PARTITION_DISCOVERY_DISABLED),
+				!getBoolean(props, KEY_DISABLE_METRICS, false));
 
 		this.properties = props;
 		setDeserializer(this.properties);
@@ -233,14 +242,17 @@ public class FlinkKafkaConsumer09<T> extends FlinkKafkaConsumerBase<T> {
 			SerializedValue<AssignerWithPeriodicWatermarks<T>> watermarksPeriodic,
 			SerializedValue<AssignerWithPunctuatedWatermarks<T>> watermarksPunctuated,
 			StreamingRuntimeContext runtimeContext,
-			OffsetCommitMode offsetCommitMode) throws Exception {
-
-		boolean useMetrics = !PropertiesUtil.getBoolean(properties, KEY_DISABLE_METRICS, false);
+			OffsetCommitMode offsetCommitMode,
+			MetricGroup consumerMetricGroup,
+			boolean useMetrics) throws Exception {
 
 		// make sure that auto commit is disabled when our offset commit mode is ON_CHECKPOINTS;
 		// this overwrites whatever setting the user configured in the properties
-		if (offsetCommitMode == OffsetCommitMode.ON_CHECKPOINTS || offsetCommitMode == OffsetCommitMode.DISABLED) {
-			properties.setProperty(ConsumerConfig.ENABLE_AUTO_COMMIT_CONFIG, "false");
+		adjustAutoCommitConfig(properties, offsetCommitMode);
+
+		// If a rateLimiter is set, then call rateLimiter.open() with the runtime context.
+		if (rateLimiter != null) {
+			rateLimiter.open(runtimeContext);
 		}
 
 		return new Kafka09Fetcher<>(
@@ -252,11 +264,13 @@ public class FlinkKafkaConsumer09<T> extends FlinkKafkaConsumerBase<T> {
 				runtimeContext.getExecutionConfig().getAutoWatermarkInterval(),
 				runtimeContext.getUserCodeClassLoader(),
 				runtimeContext.getTaskNameWithSubtasks(),
-				runtimeContext.getMetricGroup(),
 				deserializer,
 				properties,
 				pollTimeout,
-				useMetrics);
+				runtimeContext.getMetricGroup(),
+				consumerMetricGroup,
+				useMetrics,
+				rateLimiter);
 	}
 
 	@Override
@@ -270,8 +284,15 @@ public class FlinkKafkaConsumer09<T> extends FlinkKafkaConsumerBase<T> {
 
 	@Override
 	protected boolean getIsAutoCommitEnabled() {
-		return PropertiesUtil.getBoolean(properties, ConsumerConfig.ENABLE_AUTO_COMMIT_CONFIG, true) &&
+		return getBoolean(properties, ConsumerConfig.ENABLE_AUTO_COMMIT_CONFIG, true) &&
 				PropertiesUtil.getLong(properties, ConsumerConfig.AUTO_COMMIT_INTERVAL_MS_CONFIG, 5000) > 0;
+	}
+
+	@Override
+	protected Map<KafkaTopicPartition, Long> fetchOffsetsWithTimestamp(Collection<KafkaTopicPartition> partitions, long timestamp) {
+		// this should not be reached, since we do not expose the timestamp-based startup feature in version 0.9.
+		throw new UnsupportedOperationException(
+			"Fetching partition offsets using timestamps is only supported in Kafka versions 0.10 and above.");
 	}
 
 	// ------------------------------------------------------------------------
@@ -284,7 +305,7 @@ public class FlinkKafkaConsumer09<T> extends FlinkKafkaConsumerBase<T> {
 	 * @param props The Kafka properties to register the serializer in.
 	 */
 	private static void setDeserializer(Properties props) {
-		final String deSerName = ByteArrayDeserializer.class.getCanonicalName();
+		final String deSerName = ByteArrayDeserializer.class.getName();
 
 		Object keyDeSer = props.get(ConsumerConfig.KEY_DESERIALIZER_CLASS_CONFIG);
 		Object valDeSer = props.get(ConsumerConfig.VALUE_DESERIALIZER_CLASS_CONFIG);
@@ -298,5 +319,17 @@ public class FlinkKafkaConsumer09<T> extends FlinkKafkaConsumerBase<T> {
 
 		props.put(ConsumerConfig.KEY_DESERIALIZER_CLASS_CONFIG, deSerName);
 		props.put(ConsumerConfig.VALUE_DESERIALIZER_CLASS_CONFIG, deSerName);
+	}
+
+	/**
+	 * Set a rate limiter to ratelimit bytes read from Kafka.
+	 * @param kafkaRateLimiter
+	 */
+	public void setRateLimiter(FlinkConnectorRateLimiter kafkaRateLimiter) {
+		this.rateLimiter = kafkaRateLimiter;
+	}
+
+	public FlinkConnectorRateLimiter getRateLimiter() {
+		return rateLimiter;
 	}
 }

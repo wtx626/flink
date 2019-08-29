@@ -21,7 +21,7 @@ package org.apache.flink.runtime.io.network.partition;
 import org.apache.flink.runtime.io.network.partition.ResultSubpartition.BufferAndBacklog;
 
 import javax.annotation.Nullable;
-import java.io.IOException;
+
 import java.util.concurrent.atomic.AtomicBoolean;
 
 import static org.apache.flink.util.Preconditions.checkNotNull;
@@ -52,13 +52,8 @@ class PipelinedSubpartitionView implements ResultSubpartitionView {
 	}
 
 	@Override
-	public void notifyBuffersAvailable(long numBuffers) throws IOException {
-		availabilityListener.notifyBuffersAvailable(numBuffers);
-	}
-
-	@Override
-	public void notifySubpartitionConsumed() {
-		releaseAllResources();
+	public void notifyDataAvailable() {
+		availabilityListener.notifyDataAvailable();
 	}
 
 	@Override
@@ -76,8 +71,23 @@ class PipelinedSubpartitionView implements ResultSubpartitionView {
 	}
 
 	@Override
+	public boolean nextBufferIsEvent() {
+		return parent.nextBufferIsEvent();
+	}
+
+	@Override
+	public boolean isAvailable() {
+		return parent.isAvailable();
+	}
+
+	@Override
 	public Throwable getFailureCause() {
 		return parent.getFailureCause();
+	}
+
+	@Override
+	public int unsynchronizedGetNumberOfQueuedBuffers() {
+		return parent.unsynchronizedGetNumberOfQueuedBuffers();
 	}
 
 	@Override

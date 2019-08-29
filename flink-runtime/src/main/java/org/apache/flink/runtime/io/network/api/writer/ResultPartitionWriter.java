@@ -18,18 +18,28 @@
 
 package org.apache.flink.runtime.io.network.api.writer;
 
-import org.apache.flink.runtime.io.network.buffer.Buffer;
-import org.apache.flink.runtime.io.network.buffer.BufferProvider;
+import org.apache.flink.runtime.io.network.buffer.BufferBuilder;
+import org.apache.flink.runtime.io.network.buffer.BufferConsumer;
 import org.apache.flink.runtime.io.network.partition.ResultPartitionID;
+
+import javax.annotation.Nullable;
 
 import java.io.IOException;
 
 /**
  * A buffer-oriented runtime result writer API for producing results.
+ *
+ * <p>If {@link ResultPartitionWriter#close()} is called before {@link ResultPartitionWriter#fail(Throwable)} or
+ * {@link ResultPartitionWriter#finish()}, it abruptly triggers failure and cancellation of production.
+ * In this case {@link ResultPartitionWriter#fail(Throwable)} still needs to be called afterwards to fully release
+ * all resources associated the the partition and propagate failure cause to the consumer if possible.
  */
-public interface ResultPartitionWriter {
+public interface ResultPartitionWriter extends AutoCloseable {
 
-	BufferProvider getBufferProvider();
+	/**
+	 * Setup partition, potentially heavy-weight, blocking operation comparing to just creation.
+	 */
+	void setup() throws IOException;
 
 	ResultPartitionID getPartitionId();
 
@@ -38,32 +48,48 @@ public interface ResultPartitionWriter {
 	int getNumTargetKeyGroups();
 
 	/**
-	 * Adds a buffer to the subpartition with the given index.
-	 *
-	 * <p>For PIPELINED {@link org.apache.flink.runtime.io.network.partition.ResultPartitionType}s,
-	 * this will trigger the deployment of consuming tasks after the first buffer has been added.
+	 * Requests a {@link BufferBuilder} from this partition for writing data.
 	 */
-	void writeBuffer(Buffer buffer, int subpartitionIndex) throws IOException;
+	BufferBuilder getBufferBuilder() throws IOException, InterruptedException;
 
 	/**
-	 * Writes the given buffer to all available target subpartitions.
+	 * Adds the bufferConsumer to the subpartition with the given index.
 	 *
-	 * <p>The buffer is taken over and used for each of the channels.
-	 * It will be recycled afterwards.
+	 * <p>This method takes the ownership of the passed {@code bufferConsumer} and thus is responsible for releasing
+	 * it's resources.
 	 *
-	 * @param buffer the buffer to write
+	 * <p>To avoid problems with data re-ordering, before adding new {@link BufferConsumer} the previously added one
+	 * the given {@code subpartitionIndex} must be marked as {@link BufferConsumer#isFinished()}.
+	 *
+	 * @return true if operation succeeded and bufferConsumer was enqueued for consumption.
 	 */
-	default void writeBufferToAllSubpartitions(final Buffer buffer) throws IOException {
-		try {
-			for (int subpartition = 0; subpartition < getNumberOfSubpartitions(); subpartition++) {
-				// retain the buffer so that it can be recycled by each channel of targetPartition
-				buffer.retain();
-				writeBuffer(buffer, subpartition);
-			}
-		} finally {
-			// we do not need to further retain the eventBuffer
-			// (it will be recycled after the last channel stops using it)
-			buffer.recycle();
-		}
-	}
+	boolean addBufferConsumer(BufferConsumer bufferConsumer, int subpartitionIndex) throws IOException;
+
+	/**
+	 * Manually trigger consumption from enqueued {@link BufferConsumer BufferConsumers} in all subpartitions.
+	 */
+	void flushAll();
+
+	/**
+	 * Manually trigger consumption from enqueued {@link BufferConsumer BufferConsumers} in one specified subpartition.
+	 */
+	void flush(int subpartitionIndex);
+
+	/**
+	 * Fail the production of the partition.
+	 *
+	 * <p>This method propagates non-{@code null} failure causes to consumers on a best-effort basis. This call also
+	 * leads to the release of all resources associated with the partition. Closing of the partition is still needed
+	 * afterwards if it has not been done before.
+	 *
+	 * @param throwable failure cause
+	 */
+	void fail(@Nullable Throwable throwable);
+
+	/**
+	 * Successfully finish the production of the partition.
+	 *
+	 * <p>Closing of partition is still needed afterwards.
+	 */
+	void finish() throws IOException;
 }

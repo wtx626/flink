@@ -54,7 +54,7 @@ public class BufferPoolFactoryTest {
 
 	@Before
 	public void setupNetworkBufferPool() {
-		networkBufferPool = new NetworkBufferPool(numBuffers, memorySegmentSize);
+		networkBufferPool = new NetworkBufferPool(numBuffers, memorySegmentSize, 1);
 	}
 
 	@After
@@ -138,7 +138,7 @@ public class BufferPoolFactoryTest {
 			assertNull(bufferPool2.requestBuffer());
 
 			// as soon as one excess buffer of bufferPool1 is recycled, it should be available for bufferPool2
-			buffers.remove(0).recycle();
+			buffers.remove(0).recycleBuffer();
 			// recycle returns the excess buffer to the network buffer pool
 			assertEquals(1, networkBufferPool.getNumberOfAvailableMemorySegments());
 			// verify the number of buffers taken from the pools
@@ -158,7 +158,7 @@ public class BufferPoolFactoryTest {
 				bufferPool2.bestEffortGetNumOfUsedBuffers() + bufferPool2.getNumberOfAvailableMemorySegments());
 		} finally {
 			for (Buffer buffer : buffers) {
-				buffer.recycle();
+				buffer.recycleBuffer();
 			}
 			if (bufferPool1 != null) {
 				bufferPool1.lazyDestroy();
@@ -244,7 +244,7 @@ public class BufferPoolFactoryTest {
 
 	@Test
 	public void testUniformDistributionBounded3() throws IOException {
-		NetworkBufferPool globalPool = new NetworkBufferPool(3, 128);
+		NetworkBufferPool globalPool = new NetworkBufferPool(3, 128, 1);
 		try {
 			BufferPool first = globalPool.createBufferPool(0, 10);
 			assertEquals(3, first.getNumBuffers());
@@ -277,12 +277,12 @@ public class BufferPoolFactoryTest {
 	 */
 	@Test
 	public void testUniformDistributionBounded4() throws IOException {
-		NetworkBufferPool globalPool = new NetworkBufferPool(10, 128);
+		NetworkBufferPool globalPool = new NetworkBufferPool(10, 128, 2);
 		try {
 			BufferPool first = globalPool.createBufferPool(0, 10);
 			assertEquals(10, first.getNumBuffers());
 
-			List<MemorySegment> segmentList1 = globalPool.requestMemorySegments(2);
+			List<MemorySegment> segmentList1 = globalPool.requestMemorySegments();
 			assertEquals(2, segmentList1.size());
 			assertEquals(8, first.getNumBuffers());
 
@@ -290,12 +290,12 @@ public class BufferPoolFactoryTest {
 			assertEquals(4, first.getNumBuffers());
 			assertEquals(4, second.getNumBuffers());
 
-			List<MemorySegment> segmentList2 = globalPool.requestMemorySegments(2);
+			List<MemorySegment> segmentList2 = globalPool.requestMemorySegments();
 			assertEquals(2, segmentList2.size());
 			assertEquals(3, first.getNumBuffers());
 			assertEquals(3, second.getNumBuffers());
 
-			List<MemorySegment> segmentList3 = globalPool.requestMemorySegments(2);
+			List<MemorySegment> segmentList3 = globalPool.requestMemorySegments();
 			assertEquals(2, segmentList3.size());
 			assertEquals(2, first.getNumBuffers());
 			assertEquals(2, second.getNumBuffers());

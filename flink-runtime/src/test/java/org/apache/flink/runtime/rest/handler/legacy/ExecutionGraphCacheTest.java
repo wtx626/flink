@@ -27,40 +27,49 @@ import org.apache.flink.runtime.concurrent.FutureUtils;
 import org.apache.flink.runtime.executiongraph.AccessExecutionGraph;
 import org.apache.flink.runtime.executiongraph.ArchivedExecutionGraph;
 import org.apache.flink.runtime.executiongraph.ErrorInfo;
-import org.apache.flink.runtime.executiongraph.ExecutionGraph;
 import org.apache.flink.runtime.jobgraph.JobStatus;
-import org.apache.flink.runtime.jobmanager.JobManager;
-import org.apache.flink.runtime.jobmaster.JobManagerGateway;
 import org.apache.flink.runtime.messages.FlinkJobNotFoundException;
+import org.apache.flink.runtime.rest.handler.legacy.utils.ArchivedExecutionGraphBuilder;
+import org.apache.flink.runtime.webmonitor.RestfulGateway;
+import org.apache.flink.runtime.webmonitor.TestingRestfulGateway;
 import org.apache.flink.util.ExecutorUtils;
 import org.apache.flink.util.FlinkException;
+import org.apache.flink.util.Preconditions;
 import org.apache.flink.util.TestLogger;
 
+import org.hamcrest.Matchers;
+import org.junit.BeforeClass;
 import org.junit.Test;
 
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collection;
 import java.util.Collections;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Function;
 
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertThat;
 import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.fail;
-import static org.mockito.Matchers.any;
-import static org.mockito.Matchers.eq;
-import static org.mockito.Mockito.mock;
-import static org.mockito.Mockito.times;
-import static org.mockito.Mockito.verify;
-import static org.mockito.Mockito.when;
 
 /**
  * Tests for the {@link ExecutionGraphCache}.
  */
 public class ExecutionGraphCacheTest extends TestLogger {
+
+	private static ArchivedExecutionGraph expectedExecutionGraph;
+	private static final JobID expectedJobId = new JobID();
+
+	@BeforeClass
+	public static void setup() {
+		expectedExecutionGraph = new ArchivedExecutionGraphBuilder().build();
+	}
 
 	/**
 	 * Tests that we can cache AccessExecutionGraphs over multiple accesses.
@@ -69,23 +78,19 @@ public class ExecutionGraphCacheTest extends TestLogger {
 	public void testExecutionGraphCaching() throws Exception {
 		final Time timeout = Time.milliseconds(100L);
 		final Time timeToLive = Time.hours(1L);
-		final JobID jobId = new JobID();
-		final AccessExecutionGraph accessExecutionGraph = mock(AccessExecutionGraph.class);
 
-		final JobManagerGateway jobManagerGateway = mock(JobManagerGateway.class);
-		when(jobManagerGateway.requestJob(eq(jobId), any(Time.class))).thenReturn(CompletableFuture.completedFuture(accessExecutionGraph));
+		final CountingRestfulGateway restfulGateway = createCountingRestfulGateway(expectedJobId, CompletableFuture.completedFuture(expectedExecutionGraph));
 
 		try (ExecutionGraphCache executionGraphCache = new ExecutionGraphCache(timeout, timeToLive)) {
-			CompletableFuture<AccessExecutionGraph> accessExecutionGraphFuture = executionGraphCache.getExecutionGraph(jobId, jobManagerGateway);
+			CompletableFuture<AccessExecutionGraph> accessExecutionGraphFuture = executionGraphCache.getExecutionGraph(expectedJobId, restfulGateway);
 
-			assertEquals(accessExecutionGraph, accessExecutionGraphFuture.get());
+			assertEquals(expectedExecutionGraph, accessExecutionGraphFuture.get());
 
-			CompletableFuture<AccessExecutionGraph> accessExecutionGraphFuture2 = executionGraphCache.getExecutionGraph(jobId, jobManagerGateway);
+			accessExecutionGraphFuture = executionGraphCache.getExecutionGraph(expectedJobId, restfulGateway);
 
-			assertEquals(accessExecutionGraph, accessExecutionGraphFuture2.get());
+			assertEquals(expectedExecutionGraph, accessExecutionGraphFuture.get());
 
-			// verify that we only issued a single request to the gateway
-			verify(jobManagerGateway, times(1)).requestJob(eq(jobId), any(Time.class));
+			assertThat(restfulGateway.getNumRequestJobCalls(), Matchers.equalTo(1));
 		}
 	}
 
@@ -96,25 +101,25 @@ public class ExecutionGraphCacheTest extends TestLogger {
 	public void testExecutionGraphEntryInvalidation() throws Exception {
 		final Time timeout = Time.milliseconds(100L);
 		final Time timeToLive = Time.milliseconds(1L);
-		final JobID jobId = new JobID();
-		final AccessExecutionGraph accessExecutionGraph = mock(AccessExecutionGraph.class);
 
-		final JobManagerGateway jobManagerGateway = mock(JobManagerGateway.class);
-		when(jobManagerGateway.requestJob(eq(jobId), any(Time.class))).thenReturn(CompletableFuture.completedFuture(accessExecutionGraph));
+		final CountingRestfulGateway restfulGateway = createCountingRestfulGateway(
+			expectedJobId,
+			CompletableFuture.completedFuture(expectedExecutionGraph),
+			CompletableFuture.completedFuture(expectedExecutionGraph));
 
 		try (ExecutionGraphCache executionGraphCache = new ExecutionGraphCache(timeout, timeToLive)) {
-			CompletableFuture<AccessExecutionGraph> executionGraphFuture = executionGraphCache.getExecutionGraph(jobId, jobManagerGateway);
+			CompletableFuture<AccessExecutionGraph> executionGraphFuture = executionGraphCache.getExecutionGraph(expectedJobId, restfulGateway);
 
-			assertEquals(accessExecutionGraph, executionGraphFuture.get());
+			assertEquals(expectedExecutionGraph, executionGraphFuture.get());
 
 			// sleep for the TTL
-			Thread.sleep(timeToLive.toMilliseconds());
+			Thread.sleep(timeToLive.toMilliseconds() * 5L);
 
-			CompletableFuture<AccessExecutionGraph> executionGraphFuture2 = executionGraphCache.getExecutionGraph(jobId, jobManagerGateway);
+			CompletableFuture<AccessExecutionGraph> executionGraphFuture2 = executionGraphCache.getExecutionGraph(expectedJobId, restfulGateway);
 
-			assertEquals(accessExecutionGraph, executionGraphFuture2.get());
+			assertEquals(expectedExecutionGraph, executionGraphFuture2.get());
 
-			verify(jobManagerGateway, times(2)).requestJob(eq(jobId), any(Time.class));
+			assertThat(restfulGateway.getNumRequestJobCalls(), Matchers.equalTo(2));
 		}
 	}
 
@@ -127,18 +132,15 @@ public class ExecutionGraphCacheTest extends TestLogger {
 	public void testImmediateCacheInvalidationAfterFailure() throws Exception {
 		final Time timeout = Time.milliseconds(100L);
 		final Time timeToLive = Time.hours(1L);
-		final JobID jobId = new JobID();
 
-		final AccessExecutionGraph accessExecutionGraph = mock(AccessExecutionGraph.class);
-
-		final JobManagerGateway jobManagerGateway = mock(JobManagerGateway.class);
 		// let's first answer with a JobNotFoundException and then only with the correct result
-		when(jobManagerGateway.requestJob(eq(jobId), any(Time.class))).thenReturn(
-			FutureUtils.completedExceptionally(new FlinkJobNotFoundException(jobId)),
-			CompletableFuture.completedFuture(accessExecutionGraph));
+		final CountingRestfulGateway restfulGateway = createCountingRestfulGateway(
+			expectedJobId,
+			FutureUtils.completedExceptionally(new FlinkJobNotFoundException(expectedJobId)),
+			CompletableFuture.completedFuture(expectedExecutionGraph));
 
 		try (ExecutionGraphCache executionGraphCache = new ExecutionGraphCache(timeout, timeToLive)) {
-			CompletableFuture<AccessExecutionGraph> executionGraphFuture = executionGraphCache.getExecutionGraph(jobId, jobManagerGateway);
+			CompletableFuture<AccessExecutionGraph> executionGraphFuture = executionGraphCache.getExecutionGraph(expectedJobId, restfulGateway);
 
 			try {
 				executionGraphFuture.get();
@@ -148,9 +150,9 @@ public class ExecutionGraphCacheTest extends TestLogger {
 				assertTrue(ee.getCause() instanceof FlinkException);
 			}
 
-			CompletableFuture<AccessExecutionGraph> executionGraphFuture2 = executionGraphCache.getExecutionGraph(jobId, jobManagerGateway);
+			CompletableFuture<AccessExecutionGraph> executionGraphFuture2 = executionGraphCache.getExecutionGraph(expectedJobId, restfulGateway);
 
-			assertEquals(accessExecutionGraph, executionGraphFuture2.get());
+			assertEquals(expectedExecutionGraph, executionGraphFuture2.get());
 		}
 	}
 
@@ -162,27 +164,36 @@ public class ExecutionGraphCacheTest extends TestLogger {
 	public void testCacheEntryCleanup() throws Exception {
 		final Time timeout = Time.milliseconds(100L);
 		final Time timeToLive = Time.milliseconds(1L);
-		final JobID jobId1 = new JobID();
-		final JobID jobId2 = new JobID();
-		final AccessExecutionGraph accessExecutionGraph1 = mock(AccessExecutionGraph.class);
-		final AccessExecutionGraph accessExecutionGraph2 = mock(AccessExecutionGraph.class);
+		final JobID expectedJobId2 = new JobID();
+		final ArchivedExecutionGraph expectedExecutionGraph2 = new ArchivedExecutionGraphBuilder().build();
 
-		final JobManagerGateway jobManagerGateway = mock(JobManagerGateway.class);
-		when(jobManagerGateway.requestJob(eq(jobId1), any(Time.class))).thenReturn(CompletableFuture.completedFuture(accessExecutionGraph1));
-		when(jobManagerGateway.requestJob(eq(jobId2), any(Time.class))).thenReturn(CompletableFuture.completedFuture(accessExecutionGraph2));
+		final AtomicInteger requestJobCalls = new AtomicInteger(0);
+		final TestingRestfulGateway restfulGateway = TestingRestfulGateway.newBuilder()
+			.setRequestJobFunction(
+				jobId -> {
+					requestJobCalls.incrementAndGet();
+					if (jobId.equals(expectedJobId)) {
+						return CompletableFuture.completedFuture(expectedExecutionGraph);
+					} else if (jobId.equals(expectedJobId2)) {
+						return CompletableFuture.completedFuture(expectedExecutionGraph2);
+					} else {
+						throw new AssertionError("Invalid job id received.");
+					}
+				}
+			)
+			.build();
 
 		try (ExecutionGraphCache executionGraphCache = new ExecutionGraphCache(timeout, timeToLive)) {
 
-			CompletableFuture<AccessExecutionGraph> executionGraph1Future = executionGraphCache.getExecutionGraph(jobId1, jobManagerGateway);
+			CompletableFuture<AccessExecutionGraph> executionGraph1Future = executionGraphCache.getExecutionGraph(expectedJobId, restfulGateway);
 
-			CompletableFuture<AccessExecutionGraph> executionGraph2Future = executionGraphCache.getExecutionGraph(jobId2, jobManagerGateway);
+			CompletableFuture<AccessExecutionGraph> executionGraph2Future = executionGraphCache.getExecutionGraph(expectedJobId2, restfulGateway);
 
-			assertEquals(accessExecutionGraph1, executionGraph1Future.get());
+			assertEquals(expectedExecutionGraph, executionGraph1Future.get());
 
-			assertEquals(accessExecutionGraph2, executionGraph2Future.get());
+			assertEquals(expectedExecutionGraph2, executionGraph2Future.get());
 
-			verify(jobManagerGateway, times(1)).requestJob(eq(jobId1), any(Time.class));
-			verify(jobManagerGateway, times(1)).requestJob(eq(jobId2), any(Time.class));
+			assertThat(requestJobCalls.get(), Matchers.equalTo(2));
 
 			Thread.sleep(timeToLive.toMilliseconds());
 
@@ -199,12 +210,8 @@ public class ExecutionGraphCacheTest extends TestLogger {
 	public void testConcurrentAccess() throws Exception {
 		final Time timeout = Time.milliseconds(100L);
 		final Time timeToLive = Time.hours(1L);
-		final JobID jobId = new JobID();
 
-		final AccessExecutionGraph accessExecutionGraph = mock(AccessExecutionGraph.class);
-
-		final JobManagerGateway jobManagerGateway = mock(JobManagerGateway.class);
-		when(jobManagerGateway.requestJob(eq(jobId), any(Time.class))).thenReturn(CompletableFuture.completedFuture(accessExecutionGraph));
+		final CountingRestfulGateway restfulGateway = createCountingRestfulGateway(expectedJobId, CompletableFuture.completedFuture(expectedExecutionGraph));
 
 		final int numConcurrentAccesses = 10;
 
@@ -216,7 +223,7 @@ public class ExecutionGraphCacheTest extends TestLogger {
 			for (int i = 0; i < numConcurrentAccesses; i++) {
 				CompletableFuture<AccessExecutionGraph> executionGraphFuture = CompletableFuture
 					.supplyAsync(
-						() -> executionGraphCache.getExecutionGraph(jobId, jobManagerGateway),
+						() -> executionGraphCache.getExecutionGraph(expectedJobId, restfulGateway),
 						executor)
 					.thenCompose(Function.identity());
 
@@ -228,90 +235,45 @@ public class ExecutionGraphCacheTest extends TestLogger {
 			Collection<AccessExecutionGraph> allExecutionGraphs = allExecutionGraphFutures.get();
 
 			for (AccessExecutionGraph executionGraph : allExecutionGraphs) {
-				assertEquals(accessExecutionGraph, executionGraph);
+				assertEquals(expectedExecutionGraph, executionGraph);
 			}
 
-			verify(jobManagerGateway, times(1)).requestJob(eq(jobId), any(Time.class));
+			assertThat(restfulGateway.getNumRequestJobCalls(), Matchers.equalTo(1));
 		} finally {
 			ExecutorUtils.gracefulShutdown(5000L, TimeUnit.MILLISECONDS, executor);
 		}
 	}
 
-	/**
-	 * Tests that a cache entry is invalidated if the retrieved {@link AccessExecutionGraph} is in
-	 * state {@link JobStatus#SUSPENDED}.
-	 *
-	 * <p>This test can be removed once we no longer request the actual {@link ExecutionGraph} from the
-	 * {@link JobManager}.
-	 */
-	@Test
-	public void testCacheInvalidationIfSuspended() throws Exception {
-		final Time timeout = Time.milliseconds(100L);
-		final Time timeToLive = Time.hours(1L);
-		final JobID jobId = new JobID();
-
-		final AccessExecutionGraph accessExecutionGraph = mock(AccessExecutionGraph.class);
-
-		final AccessExecutionGraph suspendedExecutionGraph = mock(AccessExecutionGraph.class);
-		when(suspendedExecutionGraph.getState()).thenReturn(JobStatus.SUSPENDED);
-
-		final JobManagerGateway jobManagerGateway = mock(JobManagerGateway.class);
-		// let's first answer with a suspended ExecutionGraph and then only with the correct result
-		when(jobManagerGateway.requestJob(eq(jobId), any(Time.class))).thenReturn(
-			CompletableFuture.completedFuture(suspendedExecutionGraph),
-			CompletableFuture.completedFuture(accessExecutionGraph));
-
-		try (ExecutionGraphCache executionGraphCache = new ExecutionGraphCache(timeout, timeToLive)) {
-			CompletableFuture<AccessExecutionGraph> executionGraphFuture = executionGraphCache.getExecutionGraph(jobId, jobManagerGateway);
-
-			assertEquals(suspendedExecutionGraph, executionGraphFuture.get());
-
-			CompletableFuture<AccessExecutionGraph> executionGraphFuture2 = executionGraphCache.getExecutionGraph(jobId, jobManagerGateway);
-
-			assertEquals(accessExecutionGraph, executionGraphFuture2.get());
-		}
+	private CountingRestfulGateway createCountingRestfulGateway(JobID jobId, CompletableFuture<ArchivedExecutionGraph>... accessExecutionGraphs) {
+		final ConcurrentLinkedQueue<CompletableFuture<ArchivedExecutionGraph>> queue = new ConcurrentLinkedQueue<>(Arrays.asList(accessExecutionGraphs));
+		return new CountingRestfulGateway(
+			jobId,
+			ignored -> queue.poll());
 	}
 
 	/**
-	 * Tests that a cache entry is invalidated if the retrieved {@link AccessExecutionGraph} changes its
-	 * state to {@link JobStatus#SUSPENDED}.
-	 *
-	 * <p>This test can be removed once we no longer request the actual {@link ExecutionGraph} from the
-	 * {@link JobManager}.
+	 * {@link RestfulGateway} implementation which counts the number of {@link #requestJob(JobID, Time)} calls.
 	 */
-	@Test
-	public void testCacheInvalidationIfSwitchToSuspended() throws Exception {
-		final Time timeout = Time.milliseconds(100L);
-		final Time timeToLive = Time.hours(1L);
-		final JobID jobId = new JobID();
+	private static class CountingRestfulGateway extends TestingRestfulGateway {
 
-		final AccessExecutionGraph accessExecutionGraph = mock(AccessExecutionGraph.class);
+		private final JobID expectedJobId;
 
-		final SuspendableAccessExecutionGraph toBeSuspendedExecutionGraph = new SuspendableAccessExecutionGraph(jobId);
+		private AtomicInteger numRequestJobCalls = new AtomicInteger(0);
 
-		final JobManagerGateway jobManagerGateway = mock(JobManagerGateway.class);
-		// let's first answer with a JobNotFoundException and then only with the correct result
-		when(jobManagerGateway.requestJob(eq(jobId), any(Time.class))).thenReturn(
-			CompletableFuture.completedFuture(toBeSuspendedExecutionGraph),
-			CompletableFuture.completedFuture(accessExecutionGraph));
+		private CountingRestfulGateway(JobID expectedJobId, Function<JobID, CompletableFuture<ArchivedExecutionGraph>> requestJobFunction) {
+			this.expectedJobId = Preconditions.checkNotNull(expectedJobId);
+			this.requestJobFunction = Preconditions.checkNotNull(requestJobFunction);
+		}
 
-		try (ExecutionGraphCache executionGraphCache = new ExecutionGraphCache(timeout, timeToLive)) {
-			CompletableFuture<AccessExecutionGraph> executionGraphFuture = executionGraphCache.getExecutionGraph(jobId, jobManagerGateway);
+		@Override
+		public CompletableFuture<ArchivedExecutionGraph> requestJob(JobID jobId, Time timeout) {
+			assertThat(jobId, Matchers.equalTo(expectedJobId));
+			numRequestJobCalls.incrementAndGet();
+			return super.requestJob(jobId, timeout);
+		}
 
-			assertEquals(toBeSuspendedExecutionGraph, executionGraphFuture.get());
-
-			toBeSuspendedExecutionGraph.setJobStatus(JobStatus.SUSPENDED);
-
-			// retrieve the same job from the cache again --> this should return it and invalidate the cache entry
-			CompletableFuture<AccessExecutionGraph> executionGraphFuture2 = executionGraphCache.getExecutionGraph(jobId, jobManagerGateway);
-
-			assertEquals(accessExecutionGraph, executionGraphFuture2.get());
-
-			CompletableFuture<AccessExecutionGraph> executionGraphFuture3 = executionGraphCache.getExecutionGraph(jobId, jobManagerGateway);
-
-			assertEquals(accessExecutionGraph, executionGraphFuture3.get());
-
-			verify(jobManagerGateway, times(2)).requestJob(eq(jobId), any(Time.class));
+		public int getNumRequestJobCalls() {
+			return numRequestJobCalls.get();
 		}
 	}
 

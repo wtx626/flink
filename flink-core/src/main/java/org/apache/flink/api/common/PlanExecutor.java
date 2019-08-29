@@ -45,33 +45,6 @@ public abstract class PlanExecutor {
 	private static final String REMOTE_EXECUTOR_CLASS = "org.apache.flink.client.RemoteExecutor";
 
 	// ------------------------------------------------------------------------
-	//  Config Options
-	// ------------------------------------------------------------------------
-	
-	/** If true, all execution progress updates are not only logged, but also printed to System.out */
-	private boolean printUpdatesToSysout = true;
-
-	/**
-	 * Sets whether the executor should print progress results to "standard out" ({@link System#out}).
-	 * All progress messages are logged using the configured logging framework independent of the value
-	 * set here.
-	 * 
-	 * @param printStatus True, to print progress updates to standard out, false to not do that. 
-	 */
-	public void setPrintStatusDuringExecution(boolean printStatus) {
-		this.printUpdatesToSysout = printStatus;
-	}
-
-	/**
-	 * Gets whether the executor prints progress results to "standard out" ({@link System#out}).
-	 * 
-	 * @return True, if the executor prints progress messages to standard out, false if not.
-	 */
-	public boolean isPrintingStatusDuringExecution() {
-		return this.printUpdatesToSysout;
-	}
-
-	// ------------------------------------------------------------------------
 	//  Startup & Shutdown
 	// ------------------------------------------------------------------------
 
@@ -130,17 +103,6 @@ public abstract class PlanExecutor {
 	 */
 	public abstract String getOptimizerPlanAsJSON(Plan plan) throws Exception;
 
-	/**
-	 * Ends the job session, identified by the given JobID. Jobs can be kept around as sessions,
-	 * if a session timeout is specified. Keeping Jobs as sessions allows users to incrementally
-	 * add new operations to their dataflow, that refer to previous intermediate results of the
-	 * dataflow.
-	 * 
-	 * @param jobID The JobID identifying the job session.
-	 * @throws Exception Thrown, if the message to finish the session cannot be delivered.
-	 */
-	public abstract void endSession(JobID jobID) throws Exception;
-	
 	// ------------------------------------------------------------------------
 	//  Executor Factories
 	// ------------------------------------------------------------------------

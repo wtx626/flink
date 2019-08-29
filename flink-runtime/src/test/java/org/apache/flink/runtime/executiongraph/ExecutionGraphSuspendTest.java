@@ -19,29 +19,23 @@
 package org.apache.flink.runtime.executiongraph;
 
 import org.apache.flink.api.common.JobID;
-import org.apache.flink.api.common.time.Time;
+import org.apache.flink.runtime.concurrent.ComponentMainThreadExecutorServiceAdapter;
 import org.apache.flink.runtime.execution.ExecutionState;
 import org.apache.flink.runtime.executiongraph.restart.FixedDelayRestartStrategy;
 import org.apache.flink.runtime.executiongraph.restart.InfiniteDelayRestartStrategy;
-import org.apache.flink.runtime.executiongraph.utils.SimpleAckingTaskManagerGateway;
 import org.apache.flink.runtime.executiongraph.utils.SimpleSlotProvider;
-import org.apache.flink.runtime.jobmaster.slotpool.SlotProvider;
 import org.apache.flink.runtime.jobgraph.JobStatus;
 import org.apache.flink.runtime.jobgraph.JobVertex;
 import org.apache.flink.runtime.jobmanager.slots.TaskManagerGateway;
+import org.apache.flink.runtime.jobmaster.slotpool.SlotProvider;
 import org.apache.flink.runtime.testtasks.NoOpInvokable;
 import org.apache.flink.util.TestLogger;
 
 import org.junit.Test;
 
+import static org.hamcrest.Matchers.is;
 import static org.junit.Assert.assertEquals;
-
-import static org.mockito.Matchers.any;
-import static org.mockito.Mockito.reset;
-import static org.mockito.Mockito.spy;
-import static org.mockito.Mockito.times;
-import static org.mockito.Mockito.verify;
-import static org.mockito.Mockito.verifyNoMoreInteractions;
+import static org.junit.Assert.assertThat;
 
 /**
  * Validates that suspending out of various states works correctly.
@@ -54,7 +48,7 @@ public class ExecutionGraphSuspendTest extends TestLogger {
 	 */
 	@Test
 	public void testSuspendedOutOfCreated() throws Exception {
-		final TaskManagerGateway gateway = spy(new SimpleAckingTaskManagerGateway());
+		final InteractionsCountingTaskManagerGateway gateway = new InteractionsCountingTaskManagerGateway();
 		final int parallelism = 10;
 		final ExecutionGraph eg = createExecutionGraph(gateway, parallelism);
 
@@ -76,8 +70,8 @@ public class ExecutionGraphSuspendTest extends TestLogger {
 	 */
 	@Test
 	public void testSuspendedOutOfDeploying() throws Exception {
-		final TaskManagerGateway gateway = spy(new SimpleAckingTaskManagerGateway());
 		final int parallelism = 10;
+		final InteractionsCountingTaskManagerGateway gateway = new InteractionsCountingTaskManagerGateway(parallelism);
 		final ExecutionGraph eg = createExecutionGraph(gateway, parallelism);
 
 		eg.scheduleForExecution();
@@ -85,11 +79,9 @@ public class ExecutionGraphSuspendTest extends TestLogger {
 		validateAllVerticesInState(eg, ExecutionState.DEPLOYING);
 
 		// suspend
-
 		eg.suspend(new Exception("suspend"));
 
 		assertEquals(JobStatus.SUSPENDED, eg.getState());
-		validateAllVerticesInState(eg, ExecutionState.CANCELING);
 		validateCancelRpcCalls(gateway, parallelism);
 
 		ensureCannotLeaveSuspendedState(eg, gateway);
@@ -100,8 +92,8 @@ public class ExecutionGraphSuspendTest extends TestLogger {
 	 */
 	@Test
 	public void testSuspendedOutOfRunning() throws Exception {
-		final TaskManagerGateway gateway = spy(new SimpleAckingTaskManagerGateway());
 		final int parallelism = 10;
+		final InteractionsCountingTaskManagerGateway gateway = new InteractionsCountingTaskManagerGateway(parallelism);
 		final ExecutionGraph eg = createExecutionGraph(gateway, parallelism);
 
 		eg.scheduleForExecution();
@@ -111,23 +103,21 @@ public class ExecutionGraphSuspendTest extends TestLogger {
 		validateAllVerticesInState(eg, ExecutionState.RUNNING);
 
 		// suspend
-
 		eg.suspend(new Exception("suspend"));
 
 		assertEquals(JobStatus.SUSPENDED, eg.getState());
-		validateAllVerticesInState(eg, ExecutionState.CANCELING);
 		validateCancelRpcCalls(gateway, parallelism);
 
 		ensureCannotLeaveSuspendedState(eg, gateway);
 	}
 
 	/**
-	 * Suspending from FAILING goes to SUSPENDED and sends no additional RPC calls
+	 * Suspending from FAILING goes to SUSPENDED and sends no additional RPC calls.
 	 */
 	@Test
 	public void testSuspendedOutOfFailing() throws Exception {
-		final TaskManagerGateway gateway = spy(new SimpleAckingTaskManagerGateway());
 		final int parallelism = 10;
+		final InteractionsCountingTaskManagerGateway gateway = new InteractionsCountingTaskManagerGateway(parallelism);
 		final ExecutionGraph eg = createExecutionGraph(gateway, parallelism);
 
 		eg.scheduleForExecution();
@@ -140,10 +130,8 @@ public class ExecutionGraphSuspendTest extends TestLogger {
 
 		// suspend
 		eg.suspend(new Exception("suspend"));
+
 		assertEquals(JobStatus.SUSPENDED, eg.getState());
-
-		ExecutionGraphTestUtils.completeCancellingForAllVertices(eg);
-
 		ensureCannotLeaveSuspendedState(eg, gateway);
 	}
 
@@ -152,7 +140,7 @@ public class ExecutionGraphSuspendTest extends TestLogger {
 	 */
 	@Test
 	public void testSuspendedOutOfFailed() throws Exception {
-		final TaskManagerGateway gateway = spy(new SimpleAckingTaskManagerGateway());
+		final InteractionsCountingTaskManagerGateway gateway = new InteractionsCountingTaskManagerGateway();
 		final int parallelism = 10;
 		final ExecutionGraph eg = createExecutionGraph(gateway, parallelism);
 
@@ -176,12 +164,12 @@ public class ExecutionGraphSuspendTest extends TestLogger {
 	}
 
 	/**
-	 * Suspending from CANCELING goes to SUSPENDED and sends no additional RPC calls. 
+	 * Suspending from CANCELING goes to SUSPENDED and sends no additional RPC calls.
 	 */
 	@Test
 	public void testSuspendedOutOfCanceling() throws Exception {
-		final TaskManagerGateway gateway = spy(new SimpleAckingTaskManagerGateway());
 		final int parallelism = 10;
+		final InteractionsCountingTaskManagerGateway gateway = new InteractionsCountingTaskManagerGateway(parallelism);
 		final ExecutionGraph eg = createExecutionGraph(gateway, parallelism);
 
 		eg.scheduleForExecution();
@@ -194,9 +182,8 @@ public class ExecutionGraphSuspendTest extends TestLogger {
 
 		// suspend
 		eg.suspend(new Exception("suspend"));
-		assertEquals(JobStatus.SUSPENDED, eg.getState());
 
-		ExecutionGraphTestUtils.completeCancellingForAllVertices(eg);
+		assertEquals(JobStatus.SUSPENDED, eg.getState());
 
 		ensureCannotLeaveSuspendedState(eg, gateway);
 	}
@@ -206,7 +193,7 @@ public class ExecutionGraphSuspendTest extends TestLogger {
 	 */
 	@Test
 	public void testSuspendedOutOfCanceled() throws Exception {
-		final TaskManagerGateway gateway = spy(new SimpleAckingTaskManagerGateway());
+		final InteractionsCountingTaskManagerGateway gateway = new InteractionsCountingTaskManagerGateway();
 		final int parallelism = 10;
 		final ExecutionGraph eg = createExecutionGraph(gateway, parallelism);
 
@@ -235,6 +222,7 @@ public class ExecutionGraphSuspendTest extends TestLogger {
 	@Test
 	public void testSuspendWhileRestarting() throws Exception {
 		final ExecutionGraph eg = ExecutionGraphTestUtils.createSimpleTestGraph(new InfiniteDelayRestartStrategy(10));
+		eg.start(ComponentMainThreadExecutorServiceAdapter.forMainThread());
 		eg.scheduleForExecution();
 
 		assertEquals(JobStatus.RUNNING, eg.getState());
@@ -252,32 +240,37 @@ public class ExecutionGraphSuspendTest extends TestLogger {
 
 		assertEquals(JobStatus.SUSPENDED, eg.getState());
 
-		assertEquals(exception, eg.getFailureCause().getException());
+		assertEquals(exception, eg.getFailureCause());
 	}
 
 	// ------------------------------------------------------------------------
 	//  utilities
 	// ------------------------------------------------------------------------
 
-	private static void ensureCannotLeaveSuspendedState(ExecutionGraph eg, TaskManagerGateway gateway) {
+	private static void ensureCannotLeaveSuspendedState(ExecutionGraph eg, InteractionsCountingTaskManagerGateway gateway) {
+		gateway.waitUntilAllTasksAreSubmitted();
 		assertEquals(JobStatus.SUSPENDED, eg.getState());
-		reset(gateway);
+		gateway.resetCounts();
 
 		eg.failGlobal(new Exception("fail"));
 		assertEquals(JobStatus.SUSPENDED, eg.getState());
-		verifyNoMoreInteractions(gateway);
+		validateNoInteractions(gateway);
 
 		eg.cancel();
 		assertEquals(JobStatus.SUSPENDED, eg.getState());
-		verifyNoMoreInteractions(gateway);
+		validateNoInteractions(gateway);
 
 		eg.suspend(new Exception("suspend again"));
 		assertEquals(JobStatus.SUSPENDED, eg.getState());
-		verifyNoMoreInteractions(gateway);
+		validateNoInteractions(gateway);
 
 		for (ExecutionVertex ev : eg.getAllExecutionVertices()) {
 			assertEquals(0, ev.getCurrentExecutionAttempt().getAttemptNumber());
 		}
+	}
+
+	private static void validateNoInteractions(InteractionsCountingTaskManagerGateway gateway) {
+		assertThat(gateway.getInteractionsCount(), is(0));
 	}
 
 	private static void validateAllVerticesInState(ExecutionGraph eg, ExecutionState expected) {
@@ -286,8 +279,8 @@ public class ExecutionGraphSuspendTest extends TestLogger {
 		}
 	}
 
-	private static void validateCancelRpcCalls(TaskManagerGateway gateway, int num) {
-		verify(gateway, times(num)).cancelTask(any(ExecutionAttemptID.class), any(Time.class));
+	private static void validateCancelRpcCalls(InteractionsCountingTaskManagerGateway gateway, int num) {
+		assertThat(gateway.getCancelTaskCount(), is(num));
 	}
 
 	private static ExecutionGraph createExecutionGraph(TaskManagerGateway gateway, int parallelism) throws Exception {
@@ -299,10 +292,13 @@ public class ExecutionGraphSuspendTest extends TestLogger {
 
 		final SlotProvider slotProvider = new SimpleSlotProvider(jobId, parallelism, gateway);
 
-		return ExecutionGraphTestUtils.createSimpleTestGraph(
-				jobId,
-				slotProvider,
-				new FixedDelayRestartStrategy(0, 0),
-				vertex);
+		ExecutionGraph simpleTestGraph = ExecutionGraphTestUtils.createSimpleTestGraph(
+			jobId,
+			slotProvider,
+			new FixedDelayRestartStrategy(0, 0),
+			vertex);
+		simpleTestGraph.start(ComponentMainThreadExecutorServiceAdapter.forMainThread());
+		return simpleTestGraph;
 	}
+
 }

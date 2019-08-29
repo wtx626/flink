@@ -20,10 +20,12 @@ package org.apache.flink.runtime.io.network.netty;
 
 import org.apache.flink.core.memory.MemorySegment;
 import org.apache.flink.core.memory.MemorySegmentFactory;
+import org.apache.flink.runtime.io.network.NetworkClientHandler;
 import org.apache.flink.runtime.io.network.buffer.Buffer;
 import org.apache.flink.runtime.io.network.buffer.BufferListener;
 import org.apache.flink.runtime.io.network.buffer.BufferProvider;
 import org.apache.flink.runtime.io.network.buffer.FreeingBufferRecycler;
+import org.apache.flink.runtime.io.network.buffer.NetworkBuffer;
 import org.apache.flink.runtime.io.network.netty.exception.LocalTransportException;
 import org.apache.flink.runtime.io.network.netty.exception.RemoteTransportException;
 import org.apache.flink.runtime.io.network.netty.exception.TransportException;
@@ -32,6 +34,7 @@ import org.apache.flink.runtime.io.network.partition.consumer.InputChannelID;
 import org.apache.flink.runtime.io.network.partition.consumer.RemoteInputChannel;
 
 import org.apache.flink.shaded.guava18.com.google.common.collect.Maps;
+import org.apache.flink.shaded.netty4.io.netty.buffer.ByteBuf;
 import org.apache.flink.shaded.netty4.io.netty.channel.ChannelHandlerContext;
 import org.apache.flink.shaded.netty4.io.netty.channel.ChannelInboundHandlerAdapter;
 
@@ -46,7 +49,13 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
 import java.util.concurrent.atomic.AtomicReference;
 
-class PartitionRequestClientHandler extends ChannelInboundHandlerAdapter {
+/**
+ * Channel handler to read the messages of buffer response or error response from the
+ * producer.
+ *
+ * <p>It is used in the old network mode.
+ */
+class PartitionRequestClientHandler extends ChannelInboundHandlerAdapter implements NetworkClientHandler {
 
 	private static final Logger LOG = LoggerFactory.getLogger(PartitionRequestClientHandler.class);
 
@@ -72,19 +81,20 @@ class PartitionRequestClientHandler extends ChannelInboundHandlerAdapter {
 	// Input channel/receiver registration
 	// ------------------------------------------------------------------------
 
-	void addInputChannel(RemoteInputChannel listener) throws IOException {
+	@Override
+	public void addInputChannel(RemoteInputChannel listener) throws IOException {
 		checkError();
 
-		if (!inputChannels.containsKey(listener.getInputChannelId())) {
-			inputChannels.put(listener.getInputChannelId(), listener);
-		}
+		inputChannels.putIfAbsent(listener.getInputChannelId(), listener);
 	}
 
-	void removeInputChannel(RemoteInputChannel listener) {
+	@Override
+	public void removeInputChannel(RemoteInputChannel listener) {
 		inputChannels.remove(listener.getInputChannelId());
 	}
 
-	void cancelRequestFor(InputChannelID inputChannelId) {
+	@Override
+	public void cancelRequestFor(InputChannelID inputChannelId) {
 		if (inputChannelId == null || ctx == null) {
 			return;
 		}
@@ -92,6 +102,10 @@ class PartitionRequestClientHandler extends ChannelInboundHandlerAdapter {
 		if (cancelled.putIfAbsent(inputChannelId, inputChannelId) == null) {
 			ctx.writeAndFlush(new NettyMessage.CancelPartitionRequest(inputChannelId));
 		}
+	}
+
+	@Override
+	public void notifyCreditAvailable(final RemoteInputChannel inputChannel) {
 	}
 
 	// ------------------------------------------------------------------------
@@ -148,7 +162,11 @@ class PartitionRequestClientHandler extends ChannelInboundHandlerAdapter {
 								+ "that the remote task manager was lost.", remoteAddr, cause);
 			}
 			else {
-				tex = new LocalTransportException(cause.getMessage(), ctx.channel().localAddress(), cause);
+				SocketAddress localAddr = ctx.channel().localAddress();
+				tex = new LocalTransportException(
+					String.format("%s (connection to '%s')", cause.getMessage(), remoteAddr),
+					localAddr,
+					cause);
 			}
 
 			notifyAllChannelsOfErrorAndClose(tex);
@@ -270,12 +288,14 @@ class PartitionRequestClientHandler extends ChannelInboundHandlerAdapter {
 		boolean releaseNettyBuffer = true;
 
 		try {
+			ByteBuf nettyBuffer = bufferOrEvent.getNettyBuffer();
+			final int receivedSize = nettyBuffer.readableBytes();
 			if (bufferOrEvent.isBuffer()) {
 				// ---- Buffer ------------------------------------------------
 
 				// Early return for empty buffers. Otherwise Netty's readBytes() throws an
 				// IndexOutOfBoundsException.
-				if (bufferOrEvent.getSize() == 0) {
+				if (receivedSize == 0) {
 					inputChannel.onEmptyBuffer(bufferOrEvent.sequenceNumber, -1);
 					return true;
 				}
@@ -292,8 +312,7 @@ class PartitionRequestClientHandler extends ChannelInboundHandlerAdapter {
 					Buffer buffer = bufferProvider.requestBuffer();
 
 					if (buffer != null) {
-						buffer.setSize(bufferOrEvent.getSize());
-						bufferOrEvent.getNettyBuffer().readBytes(buffer.getNioBuffer());
+						nettyBuffer.readBytes(buffer.asByteBuf(), receivedSize);
 
 						inputChannel.onBuffer(buffer, bufferOrEvent.sequenceNumber, -1);
 
@@ -312,11 +331,11 @@ class PartitionRequestClientHandler extends ChannelInboundHandlerAdapter {
 			else {
 				// ---- Event -------------------------------------------------
 				// TODO We can just keep the serialized data in the Netty buffer and release it later at the reader
-				byte[] byteArray = new byte[bufferOrEvent.getSize()];
-				bufferOrEvent.getNettyBuffer().readBytes(byteArray);
+				byte[] byteArray = new byte[receivedSize];
+				nettyBuffer.readBytes(byteArray);
 
 				MemorySegment memSeg = MemorySegmentFactory.wrap(byteArray);
-				Buffer buffer = new Buffer(memSeg, FreeingBufferRecycler.INSTANCE, false);
+				Buffer buffer = new NetworkBuffer(memSeg, FreeingBufferRecycler.INSTANCE, false, receivedSize);
 
 				inputChannel.onBuffer(buffer, bufferOrEvent.sequenceNumber, -1);
 
@@ -328,13 +347,6 @@ class PartitionRequestClientHandler extends ChannelInboundHandlerAdapter {
 				bufferOrEvent.releaseBuffer();
 			}
 		}
-	}
-
-	/**
-	 * This class would be replaced by CreditBasedClientHandler in the final,
-	 * so we only implement this method in CreditBasedClientHandler.
-	 */
-	void notifyCreditAvailable(RemoteInputChannel inputChannel) {
 	}
 
 	private class AsyncErrorNotificationTask implements Runnable {
@@ -405,32 +417,18 @@ class PartitionRequestClientHandler extends ChannelInboundHandlerAdapter {
 
 		// Called by the recycling thread (not network I/O thread)
 		@Override
-		public boolean notifyBufferAvailable(Buffer buffer) {
-			boolean success = false;
+		public NotificationResult notifyBufferAvailable(Buffer buffer) {
+			if (availableBuffer.compareAndSet(null, buffer)) {
+				ctx.channel().eventLoop().execute(this);
 
-			try {
-				if (availableBuffer.compareAndSet(null, buffer)) {
-					ctx.channel().eventLoop().execute(this);
-
-					success = true;
-				}
-				else {
-					throw new IllegalStateException("Received a buffer notification, " +
-							" but the previous one has not been handled yet.");
-				}
+				return NotificationResult.BUFFER_USED_NO_NEED_MORE;
 			}
-			catch (Throwable t) {
-				ctx.channel().eventLoop().execute(new AsyncErrorNotificationTask(t));
+			else {
+				ctx.channel().eventLoop().execute(new AsyncErrorNotificationTask(
+					new IllegalStateException("Received a buffer notification, " +
+						" but the previous one has not been handled yet.")));
+				return NotificationResult.BUFFER_NOT_USED;
 			}
-			finally {
-				if (!success) {
-					if (buffer != null) {
-						buffer.recycle();
-					}
-				}
-			}
-
-			return false;
 		}
 
 		/**
@@ -449,9 +447,8 @@ class PartitionRequestClientHandler extends ChannelInboundHandlerAdapter {
 					throw new IllegalStateException("Running buffer availability task w/o a buffer.");
 				}
 
-				buffer.setSize(stagedBufferResponse.getSize());
-
-				stagedBufferResponse.getNettyBuffer().readBytes(buffer.getNioBuffer());
+				ByteBuf nettyBuffer = stagedBufferResponse.getNettyBuffer();
+				nettyBuffer.readBytes(buffer.asByteBuf(), nettyBuffer.readableBytes());
 				stagedBufferResponse.releaseBuffer();
 
 				RemoteInputChannel inputChannel = inputChannels.get(stagedBufferResponse.receiverId);
@@ -481,7 +478,7 @@ class PartitionRequestClientHandler extends ChannelInboundHandlerAdapter {
 			finally {
 				if (!success) {
 					if (buffer != null) {
-						buffer.recycle();
+						buffer.recycleBuffer();
 					}
 				}
 			}

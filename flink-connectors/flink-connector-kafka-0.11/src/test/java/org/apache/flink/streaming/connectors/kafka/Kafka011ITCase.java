@@ -21,9 +21,9 @@ import org.apache.flink.api.common.ExecutionConfig;
 import org.apache.flink.api.common.restartstrategy.RestartStrategies;
 import org.apache.flink.api.common.serialization.TypeInformationSerializationSchema;
 import org.apache.flink.api.common.typeinfo.TypeInformation;
+import org.apache.flink.api.common.typeinfo.Types;
 import org.apache.flink.api.common.typeutils.TypeSerializer;
 import org.apache.flink.api.java.typeutils.GenericTypeInfo;
-import org.apache.flink.api.java.typeutils.TypeInfoParser;
 import org.apache.flink.core.memory.DataInputView;
 import org.apache.flink.core.memory.DataInputViewStreamWrapper;
 import org.apache.flink.streaming.api.TimeCharacteristic;
@@ -34,11 +34,11 @@ import org.apache.flink.streaming.api.functions.sink.SinkFunction;
 import org.apache.flink.streaming.api.functions.source.SourceFunction;
 import org.apache.flink.streaming.api.operators.StreamSink;
 import org.apache.flink.streaming.api.watermark.Watermark;
+import org.apache.flink.streaming.connectors.kafka.internals.KeyedSerializationSchemaWrapper;
 import org.apache.flink.streaming.connectors.kafka.partitioner.FlinkKafkaPartitioner;
 import org.apache.flink.streaming.runtime.streamrecord.StreamRecord;
-import org.apache.flink.streaming.util.serialization.KeyedDeserializationSchema;
-import org.apache.flink.streaming.util.serialization.KeyedSerializationSchemaWrapper;
 
+import org.apache.kafka.clients.consumer.ConsumerRecord;
 import org.junit.BeforeClass;
 import org.junit.Test;
 
@@ -54,7 +54,7 @@ import java.util.Optional;
 public class Kafka011ITCase extends KafkaConsumerTestBase {
 
 	@BeforeClass
-	public static void prepare() throws ClassNotFoundException {
+	public static void prepare() throws Exception {
 		KafkaProducerTestBase.prepare();
 		((KafkaTestEnvironmentImpl) kafkaServer).setProducerSemantic(FlinkKafkaProducer011.Semantic.AT_LEAST_ONCE);
 	}
@@ -90,11 +90,6 @@ public class Kafka011ITCase extends KafkaConsumerTestBase {
 		runCancelingOnFullInputTest();
 	}
 
-	@Test(timeout = 60000)
-	public void testFailOnDeploy() throws Exception {
-		runFailOnDeployTest();
-	}
-
 	// --- source to partition mappings and exactly once ---
 
 	@Test(timeout = 60000)
@@ -128,7 +123,7 @@ public class Kafka011ITCase extends KafkaConsumerTestBase {
 
 	@Test(timeout = 60000)
 	public void testMultipleTopics() throws Exception {
-		runProduceConsumeMultipleTopics();
+		runProduceConsumeMultipleTopics(true);
 	}
 
 	@Test(timeout = 60000)
@@ -163,6 +158,11 @@ public class Kafka011ITCase extends KafkaConsumerTestBase {
 		runStartFromSpecificOffsets();
 	}
 
+	@Test(timeout = 60000)
+	public void testStartFromTimestamp() throws Exception {
+		runStartFromTimestamp();
+	}
+
 	// --- offset committing ---
 
 	@Test(timeout = 60000)
@@ -189,8 +189,7 @@ public class Kafka011ITCase extends KafkaConsumerTestBase {
 		StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
 		env.setParallelism(1);
 		env.getConfig().setRestartStrategy(RestartStrategies.noRestart());
-		env.getConfig().disableSysoutLogging();
-		env.setStreamTimeCharacteristic(TimeCharacteristic.EventTime);
+				env.setStreamTimeCharacteristic(TimeCharacteristic.EventTime);
 
 		DataStream<Long> streamWithTimestamps = env.addSource(new SourceFunction<Long>() {
 			private static final long serialVersionUID = -2255115836471289626L;
@@ -213,7 +212,7 @@ public class Kafka011ITCase extends KafkaConsumerTestBase {
 			}
 		});
 
-		final TypeInformationSerializationSchema<Long> longSer = new TypeInformationSerializationSchema<>(TypeInfoParser.<Long>parse("Long"), env.getConfig());
+		final TypeInformationSerializationSchema<Long> longSer = new TypeInformationSerializationSchema<>(Types.LONG, env.getConfig());
 		FlinkKafkaProducer011<Long> prod = new FlinkKafkaProducer011<>(topic, new KeyedSerializationSchemaWrapper<>(longSer), standardProps, Optional.of(new FlinkKafkaPartitioner<Long>() {
 			private static final long serialVersionUID = -6730989584364230617L;
 
@@ -233,8 +232,7 @@ public class Kafka011ITCase extends KafkaConsumerTestBase {
 		env = StreamExecutionEnvironment.getExecutionEnvironment();
 		env.setParallelism(1);
 		env.getConfig().setRestartStrategy(RestartStrategies.noRestart());
-		env.getConfig().disableSysoutLogging();
-		env.setStreamTimeCharacteristic(TimeCharacteristic.EventTime);
+				env.setStreamTimeCharacteristic(TimeCharacteristic.EventTime);
 
 		FlinkKafkaConsumer011<Long> kafkaSource = new FlinkKafkaConsumer011<>(topic, new LimitedLongDeserializer(), standardProps);
 		kafkaSource.assignTimestampsAndWatermarks(new AssignerWithPunctuatedWatermarks<Long>() {
@@ -319,7 +317,7 @@ public class Kafka011ITCase extends KafkaConsumerTestBase {
 		}
 	}
 
-	private static class LimitedLongDeserializer implements KeyedDeserializationSchema<Long> {
+	private static class LimitedLongDeserializer implements KafkaDeserializationSchema<Long> {
 
 		private static final long serialVersionUID = 6966177118923713521L;
 		private final TypeInformation<Long> ti;
@@ -327,7 +325,7 @@ public class Kafka011ITCase extends KafkaConsumerTestBase {
 		long cnt = 0;
 
 		public LimitedLongDeserializer() {
-			this.ti = TypeInfoParser.parse("Long");
+			this.ti = Types.LONG;
 			this.ser = ti.createSerializer(new ExecutionConfig());
 		}
 
@@ -337,9 +335,9 @@ public class Kafka011ITCase extends KafkaConsumerTestBase {
 		}
 
 		@Override
-		public Long deserialize(byte[] messageKey, byte[] message, String topic, int partition, long offset) throws IOException {
+		public Long deserialize(ConsumerRecord<byte[], byte[]> record) throws IOException {
 			cnt++;
-			DataInputView in = new DataInputViewStreamWrapper(new ByteArrayInputStream(message));
+			DataInputView in = new DataInputViewStreamWrapper(new ByteArrayInputStream(record.value()));
 			Long e = ser.deserialize(in);
 			return e;
 		}
@@ -349,5 +347,4 @@ public class Kafka011ITCase extends KafkaConsumerTestBase {
 			return cnt > 1110L;
 		}
 	}
-
 }

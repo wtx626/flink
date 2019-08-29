@@ -18,6 +18,8 @@
 
 package org.apache.flink.runtime.io.network.buffer;
 
+import org.apache.flink.util.TestLogger;
+
 import org.apache.flink.shaded.guava18.com.google.common.collect.Lists;
 
 import org.junit.After;
@@ -36,6 +38,7 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertNotNull;
@@ -47,21 +50,24 @@ import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.powermock.api.mockito.PowerMockito.spy;
 
-public class LocalBufferPoolTest {
+/**
+ * Tests for the {@link LocalBufferPool}.
+ */
+public class LocalBufferPoolTest extends TestLogger {
 
-	private final static int numBuffers = 1024;
+	private static final int numBuffers = 1024;
 
-	private final static int memorySegmentSize = 128;
+	private static final int memorySegmentSize = 128;
 
 	private NetworkBufferPool networkBufferPool;
 
 	private BufferPool localBufferPool;
 
-	private final static ExecutorService executor = Executors.newCachedThreadPool();
+	private static final ExecutorService executor = Executors.newCachedThreadPool();
 
 	@Before
 	public void setupLocalBufferPool() {
-		networkBufferPool = new NetworkBufferPool(numBuffers, memorySegmentSize);
+		networkBufferPool = new NetworkBufferPool(numBuffers, memorySegmentSize, 1);
 		localBufferPool = new LocalBufferPool(networkBufferPool, 1);
 
 		assertEquals(0, localBufferPool.getNumberOfAvailableMemorySegments());
@@ -108,7 +114,7 @@ public class LocalBufferPoolTest {
 		}
 
 		for (Buffer buffer : requests) {
-			buffer.recycle();
+			buffer.recycleBuffer();
 		}
 	}
 
@@ -142,7 +148,7 @@ public class LocalBufferPoolTest {
 
 		// Recycle should return buffers to memory segment pool
 		for (Buffer buffer : requests) {
-			buffer.recycle();
+			buffer.recycleBuffer();
 		}
 	}
 
@@ -166,12 +172,12 @@ public class LocalBufferPoolTest {
 		assertEquals(numBuffers, getNumRequestedFromMemorySegmentPool());
 
 		for (int i = 1; i < numBuffers / 2; i++) {
-			requests.remove(0).recycle();
+			requests.remove(0).recycleBuffer();
 			assertEquals(numBuffers - i, getNumRequestedFromMemorySegmentPool());
 		}
 
 		for (Buffer buffer : requests) {
-			buffer.recycle();
+			buffer.recycleBuffer();
 		}
 	}
 
@@ -188,7 +194,7 @@ public class LocalBufferPoolTest {
 
 		// Recycle all
 		for (Buffer buffer : requests) {
-			buffer.recycle();
+			buffer.recycleBuffer();
 		}
 
 		assertEquals(numBuffers, localBufferPool.getNumberOfAvailableMemorySegments());
@@ -227,13 +233,13 @@ public class LocalBufferPoolTest {
 		// Recycle the first buffer to notify both of the above listeners once
 		// and the twoTimesListener will be added into the registeredListeners
 		// queue of buffer pool again
-		available1.recycle();
+		available1.recycleBuffer();
 
 		verify(oneTimeListener, times(1)).notifyBufferAvailable(any(Buffer.class));
 		verify(twoTimesListener, times(1)).notifyBufferAvailable(any(Buffer.class));
 
 		// Recycle the second buffer to only notify the twoTimesListener
-		available2.recycle();
+		available2.recycleBuffer();
 
 		verify(oneTimeListener, times(1)).notifyBufferAvailable(any(Buffer.class));
 		verify(twoTimesListener, times(2)).notifyBufferAvailable(any(Buffer.class));
@@ -255,7 +261,7 @@ public class LocalBufferPoolTest {
 
 		localBufferPool.lazyDestroy();
 
-		available.recycle();
+		available.recycleBuffer();
 
 		verify(listener, times(1)).notifyBufferDestroyed();
 	}
@@ -333,7 +339,7 @@ public class LocalBufferPoolTest {
 		List<Buffer> requestedBuffers = f.get(60, TimeUnit.SECONDS);
 
 		for (Buffer buffer : requestedBuffers) {
-			buffer.recycle();
+			buffer.recycleBuffer();
 		}
 	}
 
@@ -354,7 +360,7 @@ public class LocalBufferPoolTest {
 		assertEquals(0, localBufferPool.getNumberOfAvailableMemorySegments());
 		assertNull(localBufferPool.requestBuffer());
 		assertEquals(0, localBufferPool.getNumberOfAvailableMemorySegments());
-		buffer1.recycle();
+		buffer1.recycleBuffer();
 		assertEquals(1, localBufferPool.getNumberOfAvailableMemorySegments());
 
 		// check max number of buffers:
@@ -366,9 +372,9 @@ public class LocalBufferPoolTest {
 		assertEquals(0, localBufferPool.getNumberOfAvailableMemorySegments());
 		assertNull(localBufferPool.requestBuffer());
 		assertEquals(0, localBufferPool.getNumberOfAvailableMemorySegments());
-		buffer1.recycle();
+		buffer1.recycleBuffer();
 		assertEquals(1, localBufferPool.getNumberOfAvailableMemorySegments());
-		buffer2.recycle();
+		buffer2.recycleBuffer();
 		assertEquals(2, localBufferPool.getNumberOfAvailableMemorySegments());
 
 		// try to set too large buffer size:
@@ -380,9 +386,9 @@ public class LocalBufferPoolTest {
 		assertEquals(0, localBufferPool.getNumberOfAvailableMemorySegments());
 		assertNull(localBufferPool.requestBuffer());
 		assertEquals(0, localBufferPool.getNumberOfAvailableMemorySegments());
-		buffer1.recycle();
+		buffer1.recycleBuffer();
 		assertEquals(1, localBufferPool.getNumberOfAvailableMemorySegments());
-		buffer2.recycle();
+		buffer2.recycleBuffer();
 		assertEquals(2, localBufferPool.getNumberOfAvailableMemorySegments());
 
 		// decrease size again
@@ -391,7 +397,7 @@ public class LocalBufferPoolTest {
 		assertNotNull(buffer1 = localBufferPool.requestBuffer());
 		assertEquals(0, localBufferPool.getNumberOfAvailableMemorySegments());
 		assertNull(localBufferPool.requestBuffer());
-		buffer1.recycle();
+		buffer1.recycleBuffer();
 		assertEquals(1, localBufferPool.getNumberOfAvailableMemorySegments());
 	}
 
@@ -405,13 +411,17 @@ public class LocalBufferPoolTest {
 
 	private BufferListener createBufferListener(int notificationTimes) {
 		return spy(new BufferListener() {
-			int times = 0;
+			AtomicInteger times = new AtomicInteger(0);
 
 			@Override
-			public boolean notifyBufferAvailable(Buffer buffer) {
-				times++;
-				buffer.recycle();
-				return times < notificationTimes;
+			public NotificationResult notifyBufferAvailable(Buffer buffer) {
+				int newCount = times.incrementAndGet();
+				buffer.recycleBuffer();
+				if (newCount < notificationTimes) {
+					return NotificationResult.BUFFER_USED_NEED_MORE;
+				} else {
+					return NotificationResult.BUFFER_USED_NO_NEED_MORE;
+				}
 			}
 
 			@Override
@@ -436,7 +446,7 @@ public class LocalBufferPoolTest {
 			try {
 				for (int i = 0; i < numBuffersToRequest; i++) {
 					Buffer buffer = bufferProvider.requestBufferBlocking();
-					buffer.recycle();
+					buffer.recycleBuffer();
 				}
 			}
 			catch (Throwable t) {

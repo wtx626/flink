@@ -21,7 +21,7 @@ package org.apache.flink.runtime.highavailability;
 import org.apache.flink.api.common.JobID;
 import org.apache.flink.runtime.blob.BlobStore;
 import org.apache.flink.runtime.checkpoint.CheckpointRecoveryFactory;
-import org.apache.flink.runtime.jobmanager.SubmittedJobGraphStore;
+import org.apache.flink.runtime.jobmanager.JobGraphStore;
 import org.apache.flink.runtime.leaderelection.LeaderElectionService;
 import org.apache.flink.runtime.leaderretrieval.LeaderRetrievalService;
 
@@ -32,7 +32,7 @@ import java.util.UUID;
  * The HighAvailabilityServices give access to all services needed for a highly-available
  * setup. In particular, the services provide access to highly available storage and
  * registries, as well as distributed counters and leader election.
- * 
+ *
  * <ul>
  *     <li>ResourceManager leader election and leader retrieval</li>
  *     <li>JobManager leader election and leader retrieval</li>
@@ -58,8 +58,8 @@ public interface HighAvailabilityServices extends AutoCloseable {
 
 	/**
 	 * This JobID should be used to identify the old JobManager when using the
-	 * {@link HighAvailabilityServices}. With Flip-6 every JobManager will have a distinct
-	 * JobID assigned.
+	 * {@link HighAvailabilityServices}. With the new mode every JobMaster will have a
+	 * distinct JobID assigned.
 	 */
 	JobID DEFAULT_JOB_ID = new JobID(0L, 0L);
 
@@ -83,7 +83,7 @@ public interface HighAvailabilityServices extends AutoCloseable {
 	 *
 	 * @param jobID The identifier of the job.
 	 * @return Leader retrieval service to retrieve the job manager for the given job
-	 * @deprecated This method should only be used by non Flip-6 code where the JobManager acts as the master.
+	 * @deprecated This method should only be used by the legacy code where the JobManager acts as the master.
 	 */
 	@Deprecated
 	LeaderRetrievalService getJobManagerLeaderRetriever(JobID jobID);
@@ -97,6 +97,8 @@ public interface HighAvailabilityServices extends AutoCloseable {
 	 * @return Leader retrieval service to retrieve the job manager for the given job
 	 */
 	LeaderRetrievalService getJobManagerLeaderRetriever(JobID jobID, String defaultJobManagerAddress);
+
+	LeaderRetrievalService getWebMonitorLeaderRetriever();
 
 	/**
 	 * Gets the leader election service for the cluster's resource manager.
@@ -120,6 +122,8 @@ public interface HighAvailabilityServices extends AutoCloseable {
 	 */
 	LeaderElectionService getJobManagerLeaderElectionService(JobID jobID);
 
+	LeaderElectionService getWebMonitorLeaderElectionService();
+
 	/**
 	 * Gets the checkpoint recovery factory for the job manager
 	 *
@@ -133,7 +137,7 @@ public interface HighAvailabilityServices extends AutoCloseable {
 	 * @return Submitted job graph store
 	 * @throws Exception if the submitted job graph store could not be created
 	 */
-	SubmittedJobGraphStore getSubmittedJobGraphStore() throws Exception;
+	JobGraphStore getJobGraphStore() throws Exception;
 
 	/**
 	 * Gets the registry that holds information about whether jobs are currently running.
@@ -156,11 +160,11 @@ public interface HighAvailabilityServices extends AutoCloseable {
 
 	/**
 	 * Closes the high availability services, releasing all resources.
-	 * 
+	 *
 	 * <p>This method <b>does not delete or clean up</b> any data stored in external stores
 	 * (file systems, ZooKeeper, etc). Another instance of the high availability
 	 * services will be able to recover the job.
-	 * 
+	 *
 	 * <p>If an exception occurs during closing services, this method will attempt to
 	 * continue closing other services and report exceptions only after all services
 	 * have been attempted to be closed.
@@ -173,14 +177,14 @@ public interface HighAvailabilityServices extends AutoCloseable {
 	/**
 	 * Closes the high availability services (releasing all resources) and deletes
 	 * all data stored by these services in external stores.
-	 * 
+	 *
 	 * <p>After this method was called, the any job or session that was managed by
 	 * these high availability services will be unrecoverable.
-	 * 
+	 *
 	 * <p>If an exception occurs during cleanup, this method will attempt to
 	 * continue the cleanup and report exceptions only after all cleanup steps have
 	 * been attempted.
-	 * 
+	 *
 	 * @throws Exception Thrown, if an exception occurred while closing these services
 	 *                   or cleaning up data stored by them.
 	 */

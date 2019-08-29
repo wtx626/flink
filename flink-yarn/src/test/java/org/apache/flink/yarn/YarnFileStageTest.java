@@ -30,6 +30,7 @@ import org.apache.hadoop.hdfs.MiniDFSCluster;
 import org.apache.hadoop.yarn.api.records.ApplicationId;
 import org.apache.hadoop.yarn.api.records.LocalResource;
 import org.apache.hadoop.yarn.util.ConverterUtils;
+import org.hamcrest.Matchers;
 import org.junit.AfterClass;
 import org.junit.Assume;
 import org.junit.Before;
@@ -41,6 +42,7 @@ import org.junit.rules.TemporaryFolder;
 
 import java.io.DataOutputStream;
 import java.io.File;
+import java.io.FileNotFoundException;
 import java.io.FileOutputStream;
 import java.util.ArrayList;
 import java.util.Collections;
@@ -163,6 +165,7 @@ public class YarnFileStageTest extends TestLogger {
 		srcFiles.put("2", "Hello 2");
 		srcFiles.put("nested/3", "Hello nested/3");
 		srcFiles.put("nested/4/5", "Hello nested/4/5");
+		srcFiles.put("test.jar", "JAR Content");
 		for (Map.Entry<String, String> src : srcFiles.entrySet()) {
 			File file = new File(srcDir, src.getKey());
 			//noinspection ResultOfMethodCallIgnored
@@ -176,7 +179,7 @@ public class YarnFileStageTest extends TestLogger {
 		try {
 			List<Path> remotePaths = new ArrayList<>();
 			HashMap<String, LocalResource> localResources = new HashMap<>();
-			AbstractYarnClusterDescriptor.uploadAndRegisterFiles(
+			final List<String> classpath = AbstractYarnClusterDescriptor.uploadAndRegisterFiles(
 				Collections.singletonList(new File(srcPath.toUri().getPath())),
 				targetFileSystem,
 				targetDir,
@@ -184,6 +187,15 @@ public class YarnFileStageTest extends TestLogger {
 				remotePaths,
 				localResources,
 				new StringBuilder());
+
+			assertThat(
+				classpath,
+				Matchers.containsInAnyOrder(
+					srcDir.getName(),
+					srcDir.getName() + "/nested",
+					srcDir.getName() + "/nested/4",
+					srcDir.getName() + "/test.jar"));
+
 			assertEquals(srcFiles.size(), localResources.size());
 
 			Path workDir = ConverterUtils
@@ -200,13 +212,23 @@ public class YarnFileStageTest extends TestLogger {
 			while (targetFilesIterator.hasNext()) {
 				LocatedFileStatus targetFile = targetFilesIterator.next();
 
-				try (FSDataInputStream in = targetFileSystem.open(targetFile.getPath())) {
-					String absolutePathString = targetFile.getPath().toString();
-					String relativePath = absolutePathString.substring(workDirPrefixLength);
-					targetFiles.put(relativePath, in.readUTF());
+				int retries = 5;
+				do {
+					try (FSDataInputStream in = targetFileSystem.open(targetFile.getPath())) {
+						String absolutePathString = targetFile.getPath().toString();
+						String relativePath = absolutePathString.substring(workDirPrefixLength);
+						targetFiles.put(relativePath, in.readUTF());
 
-					assertEquals("extraneous data in file " + relativePath, -1, in.read());
-				}
+						assertEquals("extraneous data in file " + relativePath, -1, in.read());
+						break;
+					} catch (FileNotFoundException e) {
+						// For S3, read-after-write may be eventually consistent, i.e. when trying
+						// to access the object before writing it; see
+						// https://docs.aws.amazon.com/AmazonS3/latest/dev/Introduction.html#ConsistencyModel
+						// -> try again a bit later
+						Thread.sleep(50);
+					}
+				} while ((retries--) > 0);
 			}
 
 			assertThat(targetFiles, equalTo(srcFiles));

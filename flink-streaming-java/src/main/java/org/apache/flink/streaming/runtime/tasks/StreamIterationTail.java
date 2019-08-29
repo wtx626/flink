@@ -18,7 +18,6 @@
 package org.apache.flink.streaming.runtime.tasks;
 
 import org.apache.flink.annotation.Internal;
-import org.apache.flink.runtime.checkpoint.TaskStateSnapshot;
 import org.apache.flink.runtime.execution.Environment;
 import org.apache.flink.streaming.api.operators.AbstractStreamOperator;
 import org.apache.flink.streaming.api.operators.OneInputStreamOperator;
@@ -44,8 +43,8 @@ public class StreamIterationTail<IN> extends OneInputStreamTask<IN, IN> {
 
 	private static final Logger LOG = LoggerFactory.getLogger(StreamIterationTail.class);
 
-	public StreamIterationTail(Environment environment, TaskStateSnapshot initialState) {
-		super(environment, initialState);
+	public StreamIterationTail(Environment environment) {
+		super(environment);
 	}
 
 	@Override
@@ -69,8 +68,9 @@ public class StreamIterationTail<IN> extends OneInputStreamTask<IN, IN> {
 
 		LOG.info("Iteration tail {} acquired feedback queue {}", getName(), brokerID);
 
-		this.headOperator = new RecordPusher<>();
-		this.headOperator.setup(this, getConfiguration(), new IterationTailOutput<>(dataChannel, iterationWaitTime));
+		RecordPusher<IN> headOperator = new RecordPusher<>();
+		headOperator.setup(this, getConfiguration(), new IterationTailOutput<>(dataChannel, iterationWaitTime));
+		this.headOperator = headOperator;
 
 		// call super.init() last because that needs this.headOperator to be set up
 		super.init();

@@ -40,7 +40,7 @@ import static org.apache.flink.util.Preconditions.checkNotNull;
  * <p>Backwards events only work for tasks, which produce pipelined results, where both the
  * producing and consuming task are running at the same time.
  */
-public class TaskEventDispatcher {
+public class TaskEventDispatcher implements TaskEventPublisher {
 	private static final Logger LOG = LoggerFactory.getLogger(TaskEventDispatcher.class);
 
 	private final Map<ResultPartitionID, TaskEventHandler> registeredHandlers = new HashMap<>();
@@ -102,7 +102,10 @@ public class TaskEventDispatcher {
 		checkNotNull(eventListener);
 		checkNotNull(eventType);
 
-		TaskEventHandler taskEventHandler = registeredHandlers.get(partitionId);
+		TaskEventHandler taskEventHandler;
+		synchronized (registeredHandlers) {
+			taskEventHandler = registeredHandlers.get(partitionId);
+		}
 		if (taskEventHandler == null) {
 			throw new IllegalStateException(
 				"Partition " + partitionId + " not registered at task event dispatcher.");
@@ -119,11 +122,15 @@ public class TaskEventDispatcher {
 	 * @return whether the event was published to a registered event handler (initiated via {@link
 	 * #registerPartition(ResultPartitionID)}) or not
 	 */
+	@Override
 	public boolean publish(ResultPartitionID partitionId, TaskEvent event) {
 		checkNotNull(partitionId);
 		checkNotNull(event);
 
-		TaskEventHandler taskEventHandler = registeredHandlers.get(partitionId);
+		TaskEventHandler taskEventHandler;
+		synchronized (registeredHandlers) {
+			taskEventHandler = registeredHandlers.get(partitionId);
+		}
 
 		if (taskEventHandler != null) {
 			taskEventHandler.publish(event);
